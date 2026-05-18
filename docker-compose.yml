@@ -17,6 +17,7 @@ services:
   vault-sync:
     image: alpine/git
     restart: unless-stopped
+    entrypoint: /bin/sh
     environment:
       - GIT_USER=${GIT_USER:-samhcharles}
       - GIT_TOKEN=${GIT_TOKEN}
