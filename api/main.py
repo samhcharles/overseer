@@ -135,7 +135,8 @@ async def _groq_chat(messages: list[dict]) -> dict:
             headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
             json=payload,
         )
-        r.raise_for_status()
+        if not r.is_success:
+            raise RuntimeError(f"Groq {r.status_code}: {r.text[:500]}")
         data = r.json()
         usage = data.get("usage", {})
         token_ledger[GROQ_MODEL] = token_ledger.get(GROQ_MODEL, 0) + usage.get("total_tokens", 0)
