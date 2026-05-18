@@ -18,6 +18,7 @@ from pydantic import BaseModel
 
 VAULT_PATH = Path(os.environ.get("VAULT_PATH", "/home/ubuntu/vault"))
 OVERSEER_BACKEND = os.environ.get("OVERSEER_BACKEND", "groq")
+FOUNDER_URL = os.environ.get("FOUNDER_URL", "http://100.73.12.59:4100")
 
 # Groq settings
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
@@ -295,8 +296,31 @@ class RememberRequest(BaseModel):
 # ─── endpoints ────────────────────────────────────────────────────────────────
 
 @app.get("/")
-async def dashboard():
+async def root():
     return FileResponse(Path(__file__).parent / "index.html")
+
+
+@app.get("/dashboard")
+async def dashboard_ui():
+    return FileResponse(Path(__file__).parent / "dashboard.html")
+
+
+@app.get("/status")
+async def status():
+    """Aggregate founder-helper data server-side to avoid browser CORS."""
+    async def fetch(path: str) -> dict:
+        try:
+            async with httpx.AsyncClient(timeout=5) as c:
+                r = await c.get(f"{FOUNDER_URL}{path}")
+                return r.json() if r.is_success else {"error": f"http {r.status_code}"}
+        except Exception as e:
+            return {"error": str(e)[:120]}
+
+    runtime, devices = await asyncio.gather(
+        fetch("/runtime/summary"),
+        fetch("/tailscale/devices"),
+    )
+    return {"runtime": runtime, "tailscale": devices}
 
 
 @app.get("/health")

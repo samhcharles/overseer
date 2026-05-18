@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Overseer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #000;
+  --panel: #0a0a0a;
+  --border: rgba(255,255,255,0.08);
+  --text: #e5e5e5;
+  --muted: #666;
+  --ok: #22c55e;
+  --warn: #f59e0b;
+  --down: #ef4444;
+  --accent: #f97316;
+  --font: 'Inter', system-ui, -apple-system, sans-serif;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: var(--bg); color: var(--text); font-family: var(--font); font-size: 13px; line-height: 1.5; min-height: 100dvh; }
+
+header {
+  display: flex; align-items: baseline; justify-content: space-between;
+  padding: 18px 20px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.logo { font-size: 11px; font-weight: 600; letter-spacing: 0.12em; color: var(--accent); text-transform: uppercase; }
+.updated { font-size: 11px; color: var(--muted); }
+
+main { padding: 16px 20px; max-width: 900px; }
+
+section { margin-bottom: 28px; }
+.section-title {
+  font-size: 10px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--muted); margin-bottom: 10px; display: flex; align-items: center; gap: 8px;
+}
+.section-title span { color: var(--text); font-weight: 500; letter-spacing: 0; text-transform: none; font-size: 11px; }
+
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; }
+.grid-wide { grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.card-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.card-name { font-weight: 500; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card-sub { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.dot {
+  width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+  background: var(--muted);
+}
+.dot.ok { background: var(--ok); box-shadow: 0 0 4px var(--ok); }
+.dot.warn { background: var(--warn); box-shadow: 0 0 4px var(--warn); }
+.dot.down { background: var(--down); box-shadow: 0 0 4px var(--down); }
+
+.latency { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; min-width: 36px; text-align: right; }
+.latency.ok { color: var(--ok); }
+.latency.warn { color: var(--warn); }
+.latency.down { color: var(--down); }
+
+.spark { display: flex; align-items: center; }
+.spark svg { display: block; }
+
+.badge {
+  font-size: 10px; font-weight: 500; letter-spacing: 0.04em; padding: 2px 6px;
+  border-radius: 4px; background: rgba(255,255,255,0.06); color: var(--muted);
+  white-space: nowrap;
+}
+
+.sys-row { display: flex; gap: 20px; flex-wrap: wrap; }
+.sys-item { display: flex; flex-direction: column; gap: 2px; }
+.sys-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
+.sys-val { font-size: 15px; font-weight: 500; font-variant-numeric: tabular-nums; }
+
+@media (max-width: 480px) {
+  main { padding: 12px 14px; }
+  .grid { grid-template-columns: 1fr 1fr; gap: 6px; }
+  .card { padding: 10px 12px; }
+  .card-name { font-size: 11px; }
+  .sys-val { font-size: 14px; }
+}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">Overseer</div>
+  <div class="updated" id="ts">—</div>
+</header>
+
+<main>
+  <section id="sec-overseer"></section>
+  <section id="sec-containers"></section>
+  <section id="sec-tailscale"></section>
+  <section id="sec-system"></section>
+</main>
+
+<script>
+const HISTORY = {};
+const MAX_H = 30;
+
+function record(key, ms) {
+  if (!HISTORY[key]) HISTORY[key] = [];
+  HISTORY[key].push(ms);
+  if (HISTORY[key].length > MAX_H) HISTORY[key].shift();
+}
+
+function spark(key, color) {
+  const vals = HISTORY[key] || [];
+  if (vals.length < 2) return '<svg width="44" height="14"></svg>';
+  const w = 44, h = 14;
+  const mn = Math.min(...vals), mx = Math.max(...vals);
+  const rng = mx - mn || 1;
+  const pts = vals.map((v, i) => {
+    const x = (i / (vals.length - 1)) * w;
+    const y = h - 2 - ((v - mn) / rng) * (h - 4);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+}
+
+function latClass(ms) {
+  if (ms === null) return 'down';
+  if (ms < 200) return 'ok';
+  if (ms < 800) return 'warn';
+  return 'down';
+}
+
+function dotClass(ms, up) {
+  if (!up || ms === null) return 'down';
+  if (ms < 200) return 'ok';
+  if (ms < 800) return 'warn';
+  return 'warn';
+}
+
+function fmtUptime(s) {
+  if (!s) return '—';
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  if (d > 0) return `${d}d ${h}h`;
+  const m = Math.floor((s % 3600) / 60);
+  return h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
+
+function fmtMs(ms) {
+  if (ms === null) return '—';
+  return ms < 1000 ? `${ms}ms` : `${(ms/1000).toFixed(1)}s`;
+}
+
+async function pingUrl(url) {
+  const t0 = performance.now();
+  try {
+    const r = await fetch(url, { signal: AbortSignal.timeout(4000) });
+    const ms = Math.round(performance.now() - t0);
+    return { ok: r.ok || r.status === 401 || r.status === 403, ms };
+  } catch {
+    return { ok: false, ms: null };
+  }
+}
+
+function containerStatus(statusStr) {
+  if (!statusStr) return 'down';
+  const s = statusStr.toLowerCase();
+  if (s.startsWith('up')) return 'ok';
+  if (s.includes('exited') || s.includes('dead')) return 'down';
+  return 'warn';
+}
+
+function renderCard(key, name, sub, ms, statusCls, extraRight) {
+  const c = dotClass(ms, statusCls !== 'down');
+  const lc = ms !== null ? latClass(ms) : 'down';
+  const sparkColor = c === 'ok' ? 'var(--ok)' : c === 'warn' ? 'var(--warn)' : 'var(--down)';
+  return `
+<div class="card">
+  <div class="card-row">
+    <div class="dot ${c}"></div>
+    <div class="card-name" style="flex:1">${name}</div>
+    <div class="latency ${lc}">${fmtMs(ms)}</div>
+  </div>
+  <div class="card-row">
+    <div class="card-sub">${sub || ''}</div>
+    <div class="spark">${spark(key, sparkColor)}</div>
+  </div>
+</div>`;
+}
+
+// ── Overseer health ──────────────────────────────────────────────────────────
+async function pollOverseer() {
+  const { ok, ms } = await pingUrl('/health');
+  let model = '—', vaultSync = '—';
+  try {
+    const r = await fetch('/health', { signal: AbortSignal.timeout(4000) });
+    if (r.ok) {
+      const d = await r.json();
+      model = d.model || '—';
+      const ts = d.vault_last_sync;
+      vaultSync = ts ? ts.slice(0, 16).replace('T', ' ') : '—';
+    }
+  } catch {}
+  record('overseer', ms ?? 9999);
+  const c = ok ? (ms < 200 ? 'ok' : 'warn') : 'down';
+  const sparkColor = c === 'ok' ? 'var(--ok)' : c === 'warn' ? 'var(--warn)' : 'var(--down)';
+  document.getElementById('sec-overseer').innerHTML = `
+<div class="section-title">Overseer <span>${model}</span></div>
+<div class="grid">
+  <div class="card">
+    <div class="card-row">
+      <div class="dot ${c}"></div>
+      <div class="card-name" style="flex:1">overseer-api</div>
+      <div class="latency ${latClass(ms)}">${fmtMs(ms)}</div>
+    </div>
+    <div class="card-row">
+      <div class="card-sub">vault sync: ${vaultSync}</div>
+      <div class="spark">${spark('overseer', sparkColor)}</div>
+    </div>
+  </div>
+</div>`;
+}
+
+// ── Containers + Tailscale + System ─────────────────────────────────────────
+async function pollStatus() {
+  let runtime = null, tailscale = null;
+  try {
+    const r = await fetch('/status', { signal: AbortSignal.timeout(6000) });
+    if (r.ok) {
+      const d = await r.json();
+      runtime = d.runtime;
+      tailscale = d.tailscale;
+    }
+  } catch {}
+
+  // Containers
+  const containers = runtime?.containers || [];
+  const containerCards = containers.map(c => {
+    const key = `ctr-${c.name}`;
+    const st = containerStatus(c.status);
+    const fakeMs = st === 'ok' ? 10 : null;
+    record(key, fakeMs ?? 9999);
+    const dot = st;
+    const lc = st === 'ok' ? 'ok' : 'down';
+    const sparkColor = st === 'ok' ? 'var(--ok)' : 'var(--down)';
+    const label = c.name.replace(/^[a-z0-9]+-[a-z0-9]+-/, '').replace(/-/g, '-');
+    return `
+<div class="card">
+  <div class="card-row">
+    <div class="dot ${dot}"></div>
+    <div class="card-name" style="flex:1">${c.name}</div>
+    <div class="badge">${c.status.split(' ').slice(0,2).join(' ')}</div>
+  </div>
+  <div class="card-row">
+    <div class="card-sub">${(c.image||'').split(':')[0].split('/').pop()}</div>
+    <div class="spark">${spark(key, sparkColor)}</div>
+  </div>
+</div>`;
+  }).join('');
+  const runningCount = containers.filter(c => containerStatus(c.status) === 'ok').length;
+  document.getElementById('sec-containers').innerHTML = containers.length ? `
+<div class="section-title">Containers <span>${runningCount}/${containers.length} up</span></div>
+<div class="grid">${containerCards}</div>` : '';
+
+  // Tailscale devices
+  const devices = tailscale?.devices || [];
+  const deviceCards = devices.map(d => {
+    const key = `ts-${d.hostname}`;
+    const ms = d.online ? 1 : null;
+    record(key, ms ?? 9999);
+    const dot = d.online ? 'ok' : 'down';
+    const sparkColor = d.online ? 'var(--ok)' : 'var(--down)';
+    const addr = (d.addresses || [])[0] || '—';
+    const lastSeen = d.lastSeen ? new Date(d.lastSeen).toLocaleDateString('en-GB', {day:'numeric',month:'short'}) : '—';
+    return `
+<div class="card">
+  <div class="card-row">
+    <div class="dot ${dot}"></div>
+    <div class="card-name" style="flex:1">${d.hostname}</div>
+    <div class="badge">${d.os || '—'}</div>
+  </div>
+  <div class="card-row">
+    <div class="card-sub">${addr}</div>
+    <div class="card-sub" style="flex-shrink:0">${d.online ? 'online' : lastSeen}</div>
+  </div>
+</div>`;
+  }).join('');
+  const onlineCount = devices.filter(d => d.online).length;
+  document.getElementById('sec-tailscale').innerHTML = devices.length ? `
+<div class="section-title">Tailscale <span>${onlineCount}/${devices.length} online</span></div>
+<div class="grid grid-wide">${deviceCards}</div>` : '';
+
+  // System
+  if (runtime && !runtime.error) {
+    const load = runtime.loadAverage || [0, 0, 0];
+    const uptime = fmtUptime(runtime.uptimeSeconds);
+    document.getElementById('sec-system').innerHTML = `
+<div class="section-title">System <span>${runtime.host || 'vps'}</span></div>
+<div class="card" style="max-width:360px">
+  <div class="sys-row">
+    <div class="sys-item"><div class="sys-label">Load 1m</div><div class="sys-val">${load[0]}</div></div>
+    <div class="sys-item"><div class="sys-label">Load 5m</div><div class="sys-val">${load[1]}</div></div>
+    <div class="sys-item"><div class="sys-label">Load 15m</div><div class="sys-val">${load[2]}</div></div>
+    <div class="sys-item"><div class="sys-label">Uptime</div><div class="sys-val">${uptime}</div></div>
+  </div>
+</div>`;
+  }
+}
+
+// ── Tick ─────────────────────────────────────────────────────────────────────
+let polling = false;
+async function tick() {
+  if (polling) return;
+  polling = true;
+  try {
+    await Promise.all([pollOverseer(), pollStatus()]);
+    document.getElementById('ts').textContent = new Date().toLocaleTimeString();
+  } finally {
+    polling = false;
+  }
+}
+
+tick();
+setInterval(tick, 5000);
+</script>
+</body>
+</html>
