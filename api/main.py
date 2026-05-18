@@ -1,9 +1,10 @@
 """
 Overseer API — vault-connected AI gateway.
 Backends (OVERSEER_BACKEND env var):
-  gemini → Google Gemini (default) — free 1M tokens/day, 1M context
-  groq   → Groq API — fast, 100k tokens/day free tier
-  ollama → Ollama — self-hosted on Oracle A1
+  gemini     → Google Gemini (default) — free 1M tokens/day, 1M context
+  groq       → Groq API — fast, 100k tokens/day free tier
+  openrouter → OpenRouter free-tier aggregator — use :free models only
+  ollama     → Ollama — self-hosted on Oracle A1
 """
 import asyncio
 import json
@@ -34,6 +35,11 @@ GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/openai"
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
 GROQ_BASE = "https://api.groq.com/openai/v1"
+
+# OpenRouter settings (free-tier aggregator — only use :free models to avoid billing)
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "google/gemini-2.0-flash-exp:free")
+OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 
 # Ollama settings (self-hosted — Oracle A1)
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
@@ -217,6 +223,33 @@ async def _groq_chat(messages: list[dict]) -> dict:
         return {"content": choice.get("content") or "", "tool_calls": choice.get("tool_calls") or [], "_backend_used": "groq"}
 
 
+async def _openrouter_chat(messages: list[dict]) -> dict:
+    if not OPENROUTER_MODEL.endswith(":free"):
+        raise RuntimeError(f"OpenRouter model {OPENROUTER_MODEL!r} is not a :free model — refusing to risk billing")
+    payload = {
+        "model": OPENROUTER_MODEL,
+        "messages": messages,
+        "tools": TOOLS_SPEC,
+    }
+    async with httpx.AsyncClient(timeout=60) as client:
+        r = await client.post(
+            f"{OPENROUTER_BASE}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "HTTP-Referer": "https://github.com/samhcharles/overseer-gateway",
+                "X-Title": "Overseer",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        )
+        if not r.is_success:
+            raise RuntimeError(f"OpenRouter {r.status_code}: {r.text[:500]}")
+        data = r.json()
+        token_ledger[OPENROUTER_MODEL] = token_ledger.get(OPENROUTER_MODEL, 0) + data.get("usage", {}).get("total_tokens", 0)
+        choice = data["choices"][0]["message"]
+        return {"content": choice.get("content") or "", "tool_calls": choice.get("tool_calls") or [], "_backend_used": "openrouter"}
+
+
 async def _ollama_chat(messages: list[dict]) -> dict:
     payload = {"model": OLLAMA_MODEL, "messages": messages, "tools": TOOLS_SPEC, "stream": False}
     async with httpx.AsyncClient(timeout=120) as client:
@@ -232,6 +265,8 @@ async def llm_chat(messages: list[dict]) -> dict:
         return await _ollama_chat(messages)
     if OVERSEER_BACKEND == "groq":
         return await _groq_chat(messages)
+    if OVERSEER_BACKEND == "openrouter":
+        return await _openrouter_chat(messages)
     return await _gemini_chat(messages)
 
 
@@ -282,6 +317,8 @@ def update_log(status: str, tool_calls: list[str] | None = None) -> None:
         backend_label = f"Gemini/{GEMINI_MODEL}"
     elif OVERSEER_BACKEND == "groq":
         backend_label = f"Groq/{GROQ_MODEL}"
+    elif OVERSEER_BACKEND == "openrouter":
+        backend_label = f"OpenRouter/{OPENROUTER_MODEL}"
     else:
         backend_label = f"Ollama/{OLLAMA_MODEL}"
     tool_lines = "\n".join(f"- `{t}`" for t in (tool_calls or [])[-10:]) or "*no calls*"
@@ -588,6 +625,10 @@ async def health():
             async with httpx.AsyncClient(timeout=5) as c:
                 r = await c.get(f"{GROQ_BASE}/models", headers={"Authorization": f"Bearer {GROQ_API_KEY}"})
                 backend_status = "ok" if r.status_code == 200 else f"http {r.status_code}"
+        elif OVERSEER_BACKEND == "openrouter":
+            async with httpx.AsyncClient(timeout=5) as c:
+                r = await c.get(f"{OPENROUTER_BASE}/models", headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"})
+                backend_status = "ok" if r.status_code == 200 else f"http {r.status_code}"
         else:
             async with httpx.AsyncClient(timeout=5) as c:
                 r = await c.get(f"{OLLAMA_URL}/api/tags")
@@ -604,7 +645,7 @@ async def health():
 
     return {
         "backend": OVERSEER_BACKEND,
-        "model": GEMINI_MODEL if OVERSEER_BACKEND == "gemini" else (GROQ_MODEL if OVERSEER_BACKEND == "groq" else OLLAMA_MODEL),
+        "model": {"gemini": GEMINI_MODEL, "groq": GROQ_MODEL, "openrouter": OPENROUTER_MODEL}.get(OVERSEER_BACKEND, OLLAMA_MODEL),
         "backend_status": backend_status,
         "vault_path": str(VAULT_PATH),
         "vault_last_sync": vault_sync,
