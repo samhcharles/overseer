@@ -133,7 +133,14 @@ TOOLS_SPEC = [
 # ─── backend-agnostic chat ────────────────────────────────────────────────────
 
 async def _groq_chat(messages: list[dict]) -> dict:
-    payload = {"model": GROQ_MODEL, "messages": messages, "tools": TOOLS_SPEC, "tool_choice": "auto"}
+    # Do NOT set tool_choice — llama-3.3-70b-versatile (Hermes) generates XML
+    # function call syntax when tool_choice is explicitly set, causing Groq 400.
+    payload = {
+        "model": GROQ_MODEL,
+        "messages": messages,
+        "tools": TOOLS_SPEC,
+        "parallel_tool_calls": False,
+    }
     async with httpx.AsyncClient(timeout=60) as client:
         r = await client.post(
             f"{GROQ_BASE}/chat/completions",
@@ -141,10 +148,22 @@ async def _groq_chat(messages: list[dict]) -> dict:
             json=payload,
         )
         if not r.is_success:
+            err = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+            code = (err.get("error") or {}).get("code", "")
+            # Tool use format mismatch — retry without tools so user gets a response
+            if code == "tool_use_failed" or r.status_code == 400:
+                r2 = await client.post(
+                    f"{GROQ_BASE}/chat/completions",
+                    headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+                    json={"model": GROQ_MODEL, "messages": messages},
+                )
+                if r2.is_success:
+                    data2 = r2.json()
+                    token_ledger[GROQ_MODEL] = token_ledger.get(GROQ_MODEL, 0) + data2.get("usage", {}).get("total_tokens", 0)
+                    return {"content": data2["choices"][0]["message"].get("content") or "", "tool_calls": []}
             raise RuntimeError(f"Groq {r.status_code}: {r.text[:500]}")
         data = r.json()
-        usage = data.get("usage", {})
-        token_ledger[GROQ_MODEL] = token_ledger.get(GROQ_MODEL, 0) + usage.get("total_tokens", 0)
+        token_ledger[GROQ_MODEL] = token_ledger.get(GROQ_MODEL, 0) + data.get("usage", {}).get("total_tokens", 0)
         choice = data["choices"][0]["message"]
         return {"content": choice.get("content") or "", "tool_calls": choice.get("tool_calls") or []}
 
@@ -237,43 +256,40 @@ def system_prompt() -> str:
                 first_line = sf.read_text().splitlines()[0].lstrip("#").strip()
                 skills_index += f"\n- {d.name}: {first_line}"
 
-    return f"""You are Overseer. You route raw data into the vault and retrieve it on demand.
+    return f"""You are Overseer. You route raw data into the vault and retrieve it on demand. You have tools to read, write, and search the vault.
 
 RULES:
-- No greetings. No self-introduction. No "I've noted that". No suggestions. No filler.
-- Storing data: do it silently, confirm in one line (what + where).
-- Answering questions: vault_search first. Return exactly what you find. If nothing: "[not found]".
+- No greetings. No filler. No "I've noted that".
+- Storing data: do it silently, confirm in one line: what was stored and where.
+- Answering questions: search the vault first. Return exactly what you find. If nothing: "[not found: query]".
 - Never invent or infer. Only state what is in the vault.
-- Responses are terse — one or two sentences unless more is explicitly requested.
-- If date or time is missing from an event, ask exactly one question to get it.
+- Responses are one or two sentences unless more is explicitly requested.
+- If an event is missing a date, ask exactly one question to get it.
 
 NO DRIFT — every write must keep the vault consistent:
-- Storing a person fact: write to BOTH memory/facts/people.md AND wiki/personal/people/[name].md
-- Storing a system change: write to BOTH memory/facts/ AND the relevant wiki/systems/[name].md
-- Before writing to any wiki page, vault_read it first and merge — never overwrite, only append or update
-- Tags must be lowercase kebab-case, consistent with existing tags on the page
-- Dates must always be included: format YYYY-MM-DD
+- Person fact: write to memory/facts/people.md AND wiki/personal/people/NAME.md
+- System change: write to memory/facts/ AND wiki/systems/NAME.md
+- Before writing any wiki page: read it first and merge — never overwrite, only append or update
+- Tags: lowercase kebab-case. Dates: YYYY-MM-DD always included.
 
-ROUTING — when the user gives raw data, route it:
-- Person, relationship, contact → wiki/personal/people/[firstname].md (read templates/person.md first)
-- Birthday or fact about someone → memory/facts/people.md + person note
-- Personal preference or default → memory/facts/preferences.md
-- Recurring schedule or event → memory/facts/recurring.md
-- Event that happened → wiki/sessions/events/[YYYY-MM-DD]-[slug].md
-- Project info → wiki/projects/[project-name].md (read templates/project.md first)
-- System or infra change → wiki/systems/[name].md (read templates/system.md first)
-- Session/work debrief → wiki/sessions/[YYYY-MM-DD]-[slug].md
-- Anything else raw → inbox/yap/[YYYY-MM-DD]-[slug].md
+ROUTING — when raw data arrives, route it:
+- Person, relationship, contact: wiki/personal/people/FIRSTNAME.md
+- Birthday or fact about a person: memory/facts/people.md and the person's note
+- Personal preference: memory/facts/preferences.md
+- Recurring schedule: memory/facts/recurring.md
+- Past event: wiki/sessions/events/YYYY-MM-DD-SLUG.md
+- Project info: wiki/projects/PROJECT-NAME.md
+- System or infra change: wiki/systems/NAME.md
+- Work session debrief: wiki/sessions/YYYY-MM-DD-SLUG.md
+- Anything else raw: inbox/yap/YYYY-MM-DD-SLUG.md
 
-SKILLS — read a skill before performing its task:
-{skills_index or "- [no skills loaded]"}
-Read with: vault_read("overseer/skills/[name]/SKILL.md")
+SKILLS — before performing a complex task, read the relevant skill file first:
+{skills_index or "(no skills loaded)"}
 
-Current memory facts:
+Current facts:
 {facts}
 
-Today: {datetime.now().strftime("%Y-%m-%d, %A")}
-"""
+Today: {datetime.now().strftime("%Y-%m-%d, %A")}"""
 
 
 # ─── request models ───────────────────────────────────────────────────────────
