@@ -551,7 +551,6 @@ async def chat(req: ChatRequest):
         answer, tool_log = await run_tool_loop(messages)
         flush_token_ledger()
         update_log(f"Done: {req.message[:60]}", tool_log)
-        asyncio.create_task(extract_entities(req.message))
         return {"response": answer, "tool_calls": tool_log, "backend": OVERSEER_BACKEND, "extracted": None}
     except Exception as e:
         import traceback
