@@ -24,7 +24,7 @@ services:
     volumes:
       - vault_data:/vault
     command: >
-      sh -c "
+      -c "
         git config --global --add safe.directory /vault &&
         git config --global user.email 'overseer@brain' &&
         git config --global user.name 'Overseer' &&
