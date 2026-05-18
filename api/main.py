@@ -13,7 +13,7 @@ from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 VAULT_PATH = Path(os.environ.get("VAULT_PATH", "/home/ubuntu/vault"))
@@ -300,6 +300,11 @@ class RememberRequest(BaseModel):
 
 
 # ─── endpoints ────────────────────────────────────────────────────────────────
+
+@app.get("/")
+async def dashboard():
+    return FileResponse(Path(__file__).parent / "index.html")
+
 
 @app.get("/health")
 async def health():
