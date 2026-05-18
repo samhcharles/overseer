@@ -28,10 +28,14 @@ services:
         git config --global --add safe.directory /vault &&
         git config --global user.email 'overseer@brain' &&
         git config --global user.name 'Overseer' &&
+        REMOTE=https://$$GIT_USER:$$GIT_TOKEN@github.com/samhcharles/brain.git &&
         if [ ! -d /vault/.git ]; then
-          git clone https://$$GIT_USER:$$GIT_TOKEN@github.com/samhcharles/brain.git /vault;
+          git -C /vault init &&
+          git -C /vault remote add origin $$REMOTE &&
+          git -C /vault fetch origin &&
+          git -C /vault reset --hard origin/main;
         fi &&
-        git -C /vault remote set-url origin https://$$GIT_USER:$$GIT_TOKEN@github.com/samhcharles/brain.git &&
+        git -C /vault remote set-url origin $$REMOTE &&
         while true; do
           git -C /vault pull --rebase origin main 2>&1 | tail -1;
           sleep 300;
