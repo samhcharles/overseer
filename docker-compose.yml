@@ -29,8 +29,8 @@ services:
         git config --global user.email 'overseer@brain' &&
         git config --global user.name 'Overseer' &&
         REMOTE=https://$$GIT_USER:$$GIT_TOKEN@github.com/samhcharles/brain.git &&
-        if [ ! -d /vault/.git ]; then
-          rm -rf /vault/* /vault/.*  2>/dev/null || true;
+        if [ ! -d /vault/.git ] || ! git -C /vault rev-parse HEAD >/dev/null 2>&1; then
+          rm -rf /vault/.git /vault/* 2>/dev/null || true;
           git clone $$REMOTE /vault;
         fi &&
         git -C /vault remote set-url origin $$REMOTE &&
