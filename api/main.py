@@ -1,8 +1,9 @@
 """
 Overseer API — vault-connected AI gateway.
-Supports two backends via OVERSEER_BACKEND env var:
-  groq   → Groq API (default, free tier, for now)
-  ollama → Ollama (switch to this when Oracle A1 is ready)
+Backends (OVERSEER_BACKEND env var):
+  gemini → Google Gemini (default) — free 1M tokens/day, 1M context
+  groq   → Groq API — fast, 100k tokens/day free tier
+  ollama → Ollama — self-hosted on Oracle A1
 """
 import asyncio
 import json
@@ -18,15 +19,21 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 VAULT_PATH = Path(os.environ.get("VAULT_PATH", "/home/ubuntu/vault"))
-OVERSEER_BACKEND = os.environ.get("OVERSEER_BACKEND", "groq")
+OVERSEER_BACKEND = os.environ.get("OVERSEER_BACKEND", "gemini")
 FOUNDER_URL = os.environ.get("FOUNDER_URL", "http://100.73.12.59:4100")
 
-# Groq settings
+# Gemini settings (default — free 1M tokens/day, 1M context window)
+# Get key free at aistudio.google.com
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/openai"
+
+# Groq settings (fallback — 100k tokens/day free tier)
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
 GROQ_BASE = "https://api.groq.com/openai/v1"
 
-# Ollama settings (used when backend=ollama, e.g. on Oracle A1)
+# Ollama settings (self-hosted — Oracle A1)
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:14b")
 
@@ -135,6 +142,26 @@ TOOLS_SPEC = [
 
 # ─── backend-agnostic chat ────────────────────────────────────────────────────
 
+async def _gemini_chat(messages: list[dict]) -> dict:
+    payload = {
+        "model": GEMINI_MODEL,
+        "messages": messages,
+        "tools": TOOLS_SPEC,
+    }
+    async with httpx.AsyncClient(timeout=60) as client:
+        r = await client.post(
+            f"{GEMINI_BASE}/chat/completions",
+            headers={"Authorization": f"Bearer {GEMINI_API_KEY}", "Content-Type": "application/json"},
+            json=payload,
+        )
+        if not r.is_success:
+            raise RuntimeError(f"Gemini {r.status_code}: {r.text[:500]}")
+        data = r.json()
+        token_ledger[GEMINI_MODEL] = token_ledger.get(GEMINI_MODEL, 0) + data.get("usage", {}).get("total_tokens", 0)
+        choice = data["choices"][0]["message"]
+        return {"content": choice.get("content") or "", "tool_calls": choice.get("tool_calls") or []}
+
+
 async def _groq_chat(messages: list[dict]) -> dict:
     # Do NOT set tool_choice — llama-3.3-70b-versatile (Hermes) generates XML
     # function call syntax when tool_choice is explicitly set, causing Groq 400.
@@ -184,7 +211,9 @@ async def _ollama_chat(messages: list[dict]) -> dict:
 async def llm_chat(messages: list[dict]) -> dict:
     if OVERSEER_BACKEND == "ollama":
         return await _ollama_chat(messages)
-    return await _groq_chat(messages)
+    if OVERSEER_BACKEND == "groq":
+        return await _groq_chat(messages)
+    return await _gemini_chat(messages)
 
 
 async def run_tool_loop(messages: list[dict]) -> tuple[str, list[str]]:
@@ -226,7 +255,12 @@ async def run_tool_loop(messages: list[dict]) -> tuple[str, list[str]]:
 
 def update_log(status: str, tool_calls: list[str] | None = None) -> None:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    backend_label = f"Groq/{GROQ_MODEL}" if OVERSEER_BACKEND == "groq" else f"Ollama/{OLLAMA_MODEL}"
+    if OVERSEER_BACKEND == "gemini":
+        backend_label = f"Gemini/{GEMINI_MODEL}"
+    elif OVERSEER_BACKEND == "groq":
+        backend_label = f"Groq/{GROQ_MODEL}"
+    else:
+        backend_label = f"Ollama/{OLLAMA_MODEL}"
     tool_lines = "\n".join(f"- `{t}`" for t in (tool_calls or [])[-10:]) or "*no calls*"
     content = f"---\ntags: [overseer, log]\n---\n\n# Overseer Log\n\n- **{now}** — {backend_label}\n- {status}\n\n## Last calls\n\n{tool_lines}\n"
     log_path = VAULT_PATH / "memory" / "overseer-live.md"
@@ -501,7 +535,14 @@ async def status():
 async def health():
     backend_status = "unknown"
     try:
-        if OVERSEER_BACKEND == "groq":
+        if OVERSEER_BACKEND == "gemini":
+            async with httpx.AsyncClient(timeout=5) as c:
+                r = await c.get(
+                    "https://generativelanguage.googleapis.com/v1beta/models",
+                    params={"key": GEMINI_API_KEY},
+                )
+                backend_status = "ok" if r.status_code == 200 else f"http {r.status_code}"
+        elif OVERSEER_BACKEND == "groq":
             async with httpx.AsyncClient(timeout=5) as c:
                 r = await c.get(f"{GROQ_BASE}/models", headers={"Authorization": f"Bearer {GROQ_API_KEY}"})
                 backend_status = "ok" if r.status_code == 200 else f"http {r.status_code}"
@@ -521,7 +562,7 @@ async def health():
 
     return {
         "backend": OVERSEER_BACKEND,
-        "model": GROQ_MODEL if OVERSEER_BACKEND == "groq" else OLLAMA_MODEL,
+        "model": GEMINI_MODEL if OVERSEER_BACKEND == "gemini" else (GROQ_MODEL if OVERSEER_BACKEND == "groq" else OLLAMA_MODEL),
         "backend_status": backend_status,
         "vault_path": str(VAULT_PATH),
         "vault_last_sync": vault_sync,
