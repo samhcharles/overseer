@@ -3,340 +3,364 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<title>Overseer</title>
+<title>sys</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
 :root {
   --bg: #000;
-  --panel: #0a0a0a;
-  --border: rgba(255,255,255,0.08);
-  --text: #e5e5e5;
-  --muted: #666;
+  --panel: #090909;
+  --border: rgba(255,255,255,0.07);
+  --text: #d4d4d4;
+  --muted: #555;
+  --dim: #333;
   --ok: #22c55e;
   --warn: #f59e0b;
   --down: #ef4444;
-  --accent: #f97316;
   --font: 'Inter', system-ui, -apple-system, sans-serif;
 }
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-body { background: var(--bg); color: var(--text); font-family: var(--font); font-size: 13px; line-height: 1.5; min-height: 100dvh; }
+html, body { height: 100%; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
 
 header {
-  display: flex; align-items: baseline; justify-content: space-between;
-  padding: 18px 20px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 12px 18px;
   border-bottom: 1px solid var(--border);
+  gap: 16px;
 }
-.logo { font-size: 11px; font-weight: 600; letter-spacing: 0.12em; color: var(--accent); text-transform: uppercase; }
-.updated { font-size: 11px; color: var(--muted); }
+#ts { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+#conn { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); }
+#conn-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--dim); flex-shrink: 0; }
+#conn-dot.ok { background: var(--ok); }
+#conn-dot.err { background: var(--down); }
 
-main { padding: 16px 20px; max-width: 900px; }
+main { padding: 14px 18px; }
 
-section { margin-bottom: 28px; }
-.section-title {
-  font-size: 10px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase;
-  color: var(--muted); margin-bottom: 10px; display: flex; align-items: center; gap: 8px;
+section { margin-bottom: 24px; }
+.sh {
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 8px;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
 }
-.section-title span { color: var(--text); font-weight: 500; letter-spacing: 0; text-transform: none; font-size: 11px; }
+.sh em { font-style: normal; font-weight: 400; letter-spacing: 0; text-transform: none; font-size: 11px; color: var(--dim); }
 
-.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; }
-.grid-wide { grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 6px; }
 
 .card {
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 12px 14px;
-  display: flex; flex-direction: column; gap: 6px;
+  border-radius: 6px;
+  padding: 10px 12px;
 }
-.card-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.card-name { font-weight: 500; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.card-sub { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-
+.cr { display: flex; align-items: center; gap: 7px; }
+.cr + .cr { margin-top: 5px; }
 .dot {
-  width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
-  background: var(--muted);
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--dim); flex-shrink: 0;
+  transition: background 0.3s;
 }
-.dot.ok { background: var(--ok); box-shadow: 0 0 4px var(--ok); }
-.dot.warn { background: var(--warn); box-shadow: 0 0 4px var(--warn); }
-.dot.down { background: var(--down); box-shadow: 0 0 4px var(--down); }
+.dot.ok  { background: var(--ok);   box-shadow: 0 0 5px rgba(34,197,94,.35); }
+.dot.warn{ background: var(--warn); box-shadow: 0 0 5px rgba(245,158,11,.35); }
+.dot.down{ background: var(--down); box-shadow: 0 0 5px rgba(239,68,68,.35); }
 
-.latency { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; min-width: 36px; text-align: right; }
-.latency.ok { color: var(--ok); }
-.latency.warn { color: var(--warn); }
-.latency.down { color: var(--down); }
+.cn { flex: 1; font-weight: 500; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.cs { font-size: 11px; color: var(--muted); white-space: nowrap; }
+.cb { font-size: 10px; padding: 1px 5px; border-radius: 3px; background: rgba(255,255,255,0.05); color: var(--dim); white-space: nowrap; flex-shrink: 0; }
+.sp svg { display: block; }
 
-.spark { display: flex; align-items: center; }
-.spark svg { display: block; }
+.sys-g { display: flex; gap: 18px; flex-wrap: wrap; }
+.si { display: flex; flex-direction: column; gap: 2px; }
+.sl { font-size: 9.5px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
+.sv { font-size: 14px; font-weight: 500; font-variant-numeric: tabular-nums; }
 
-.badge {
-  font-size: 10px; font-weight: 500; letter-spacing: 0.04em; padding: 2px 6px;
-  border-radius: 4px; background: rgba(255,255,255,0.06); color: var(--muted);
-  white-space: nowrap;
-}
-
-.sys-row { display: flex; gap: 20px; flex-wrap: wrap; }
-.sys-item { display: flex; flex-direction: column; gap: 2px; }
-.sys-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
-.sys-val { font-size: 15px; font-weight: 500; font-variant-numeric: tabular-nums; }
-
-@media (max-width: 480px) {
-  main { padding: 12px 14px; }
-  .grid { grid-template-columns: 1fr 1fr; gap: 6px; }
-  .card { padding: 10px 12px; }
-  .card-name { font-size: 11px; }
-  .sys-val { font-size: 14px; }
+@media (max-width: 460px) {
+  main { padding: 10px 12px; }
+  .grid { grid-template-columns: 1fr 1fr; gap: 5px; }
+  .cn { font-size: 11px; }
+  .sv { font-size: 13px; }
 }
 </style>
 </head>
 <body>
-
 <header>
-  <div class="logo">Overseer</div>
-  <div class="updated" id="ts">—</div>
+  <div id="conn"><div id="conn-dot"></div><span id="conn-label">connecting</span></div>
+  <div id="ts">—</div>
 </header>
-
 <main>
-  <section id="sec-overseer"></section>
   <section id="sec-containers"></section>
   <section id="sec-tailscale"></section>
   <section id="sec-system"></section>
 </main>
-
 <script>
-const HISTORY = {};
-const MAX_H = 30;
+'use strict';
+const H = {};   // latency history: key → [ms, ...]
+const MAX_H = 40;
+// DOM refs for in-place updates (avoids full re-render flash)
+const CARDS = {};  // key → { el, dotEl, badgeEl, sparkEl, subEl }
 
-function record(key, ms) {
-  if (!HISTORY[key]) HISTORY[key] = [];
-  HISTORY[key].push(ms);
-  if (HISTORY[key].length > MAX_H) HISTORY[key].shift();
+function hist(key, ms) {
+  if (!H[key]) H[key] = [];
+  H[key].push(ms);
+  if (H[key].length > MAX_H) H[key].shift();
 }
 
 function spark(key, color) {
-  const vals = HISTORY[key] || [];
-  if (vals.length < 2) return '<svg width="44" height="14"></svg>';
-  const w = 44, h = 14;
-  const mn = Math.min(...vals), mx = Math.max(...vals);
-  const rng = mx - mn || 1;
-  const pts = vals.map((v, i) => {
-    const x = (i / (vals.length - 1)) * w;
-    const y = h - 2 - ((v - mn) / rng) * (h - 4);
-    return `${x.toFixed(1)},${y.toFixed(1)}`;
-  }).join(' ');
-  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  const v = H[key] || [];
+  if (v.length < 2) return '<svg width="44" height="12"></svg>';
+  const w = 44, h = 12;
+  const mn = Math.min(...v), mx = Math.max(...v), rng = mx - mn || 1;
+  const pts = v.map((n, i) => `${((i/(v.length-1))*w).toFixed(1)},${(h-2-((n-mn)/rng)*(h-4)).toFixed(1)}`).join(' ');
+  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 }
 
-function latClass(ms) {
-  if (ms === null) return 'down';
-  if (ms < 200) return 'ok';
-  if (ms < 800) return 'warn';
-  return 'down';
+function scol(cls) {
+  return cls==='ok' ? 'var(--ok)' : cls==='warn' ? 'var(--warn)' : 'var(--down)';
 }
 
-function dotClass(ms, up) {
-  if (!up || ms === null) return 'down';
-  if (ms < 200) return 'ok';
-  if (ms < 800) return 'warn';
-  return 'warn';
-}
-
-function fmtUptime(s) {
+function fmtUp(s) {
   if (!s) return '—';
-  const d = Math.floor(s / 86400);
-  const h = Math.floor((s % 86400) / 3600);
-  if (d > 0) return `${d}d ${h}h`;
-  const m = Math.floor((s % 3600) / 60);
-  return h > 0 ? `${h}h ${m}m` : `${m}m`;
+  const d = Math.floor(s/86400), h = Math.floor((s%86400)/3600);
+  return d > 0 ? `${d}d ${h}h` : `${h}h ${Math.floor((s%3600)/60)}m`;
 }
 
-function fmtMs(ms) {
-  if (ms === null) return '—';
-  return ms < 1000 ? `${ms}ms` : `${(ms/1000).toFixed(1)}s`;
+// Strip Coolify UUID+timestamp suffix from container names
+function cleanName(n) {
+  return n.replace(/-[a-z0-9]{20,}-\d{9,}$/, '')
+          .replace(/-[a-z0-9]{20,}$/, '');
 }
 
-async function pingUrl(url) {
-  const t0 = performance.now();
-  try {
-    const r = await fetch(url, { signal: AbortSignal.timeout(4000) });
-    const ms = Math.round(performance.now() - t0);
-    return { ok: r.ok || r.status === 401 || r.status === 403, ms };
-  } catch {
-    return { ok: false, ms: null };
-  }
-}
-
-function containerStatus(statusStr) {
-  if (!statusStr) return 'down';
-  const s = statusStr.toLowerCase();
-  if (s.startsWith('up')) return 'ok';
-  if (s.includes('exited') || s.includes('dead')) return 'down';
+// Returns 'ok', 'warn', or 'down' from docker status string
+function cstatus(s) {
+  if (!s) return 'down';
+  const l = s.toLowerCase();
+  if (l.startsWith('up')) return 'ok';
+  if (l.includes('exited') || l.includes('dead')) return 'down';
   return 'warn';
 }
 
-function renderCard(key, name, sub, ms, statusCls, extraRight) {
-  const c = dotClass(ms, statusCls !== 'down');
-  const lc = ms !== null ? latClass(ms) : 'down';
-  const sparkColor = c === 'ok' ? 'var(--ok)' : c === 'warn' ? 'var(--warn)' : 'var(--down)';
-  return `
-<div class="card">
-  <div class="card-row">
-    <div class="dot ${c}"></div>
-    <div class="card-name" style="flex:1">${name}</div>
-    <div class="latency ${lc}">${fmtMs(ms)}</div>
-  </div>
-  <div class="card-row">
-    <div class="card-sub">${sub || ''}</div>
-    <div class="spark">${spark(key, sparkColor)}</div>
-  </div>
-</div>`;
+// True if the name looks like a bare Coolify deploy UUID (no meaningful prefix)
+function isDeployContainer(name) {
+  return /^[a-z0-9]{20,}$/.test(name);
 }
 
-// ── Overseer health ──────────────────────────────────────────────────────────
-async function pollOverseer() {
-  const { ok, ms } = await pingUrl('/health');
-  let model = '—', vaultSync = '—';
-  try {
-    const r = await fetch('/health', { signal: AbortSignal.timeout(4000) });
-    if (r.ok) {
-      const d = await r.json();
-      model = d.model || '—';
-      const ts = d.vault_last_sync;
-      vaultSync = ts ? ts.slice(0, 16).replace('T', ' ') : '—';
-    }
-  } catch {}
-  record('overseer', ms ?? 9999);
-  const c = ok ? (ms < 200 ? 'ok' : 'warn') : 'down';
-  const sparkColor = c === 'ok' ? 'var(--ok)' : c === 'warn' ? 'var(--warn)' : 'var(--down)';
-  document.getElementById('sec-overseer').innerHTML = `
-<div class="section-title">Overseer <span>${model}</span></div>
-<div class="grid">
-  <div class="card">
-    <div class="card-row">
-      <div class="dot ${c}"></div>
-      <div class="card-name" style="flex:1">overseer-api</div>
-      <div class="latency ${latClass(ms)}">${fmtMs(ms)}</div>
-    </div>
-    <div class="card-row">
-      <div class="card-sub">vault sync: ${vaultSync}</div>
-      <div class="spark">${spark('overseer', sparkColor)}</div>
-    </div>
-  </div>
-</div>`;
+// ── in-place card update ───────────────────────────────────────────────────
+function setCard(key, dotCls, badge, sub, sparkKey) {
+  const r = CARDS[key];
+  if (!r) return;
+  r.dotEl.className = `dot ${dotCls}`;
+  if (r.badgeEl) r.badgeEl.textContent = badge;
+  if (r.subEl)   r.subEl.textContent = sub;
+  if (r.sparkEl) r.sparkEl.innerHTML = spark(sparkKey || key, scol(dotCls));
 }
 
-// ── Containers + Tailscale + System ─────────────────────────────────────────
-async function pollStatus() {
-  let runtime = null, tailscale = null;
-  try {
-    const r = await fetch('/status', { signal: AbortSignal.timeout(6000) });
-    if (r.ok) {
-      const d = await r.json();
-      runtime = d.runtime;
-      tailscale = d.tailscale;
-    }
-  } catch {}
+function mkCard(key, name, dotCls, badge, sub) {
+  const div = document.createElement('div');
+  div.className = 'card';
+  div.dataset.key = key;
+  div.innerHTML = `
+<div class="cr">
+  <div class="dot ${dotCls}" data-ref="dot"></div>
+  <div class="cn" title="${name}">${name}</div>
+  <div class="cb" data-ref="badge">${badge}</div>
+</div>
+<div class="cr">
+  <div class="cs" data-ref="sub" style="flex:1">${sub}</div>
+  <div class="sp" data-ref="spark">${spark(key, scol(dotCls))}</div>
+</div>`;
+  CARDS[key] = {
+    el: div,
+    dotEl: div.querySelector('[data-ref="dot"]'),
+    badgeEl: div.querySelector('[data-ref="badge"]'),
+    subEl: div.querySelector('[data-ref="sub"]'),
+    sparkEl: div.querySelector('[data-ref="spark"]'),
+  };
+  return div;
+}
 
-  // Containers
-  const containers = runtime?.containers || [];
-  const containerCards = containers.map(c => {
+function mkDevCard(key, hostname, dotCls, os, addr, when) {
+  const div = document.createElement('div');
+  div.className = 'card';
+  div.dataset.key = key;
+  div.innerHTML = `
+<div class="cr">
+  <div class="dot ${dotCls}" data-ref="dot"></div>
+  <div class="cn">${hostname}</div>
+  <div class="cb">${os||'—'}</div>
+</div>
+<div class="cr">
+  <div class="cs" data-ref="sub" style="flex:1">${addr}</div>
+  <div class="cs" data-ref="when" style="flex-shrink:0">${when}</div>
+</div>`;
+  CARDS[key] = {
+    el: div,
+    dotEl: div.querySelector('[data-ref="dot"]'),
+    subEl: div.querySelector('[data-ref="sub"]'),
+    whenEl: div.querySelector('[data-ref="when"]'),
+  };
+  return div;
+}
+
+// ── sections ───────────────────────────────────────────────────────────────
+let secContainersBuilt = false;
+let secTailscaleBuilt = false;
+
+function renderContainers(containers) {
+  const sec = document.getElementById('sec-containers');
+  const running = containers.filter(c => cstatus(c.status) === 'ok').length;
+
+  // Build or update section title
+  let title = sec.querySelector('.sh');
+  if (!title) {
+    title = document.createElement('div');
+    title.className = 'sh';
+    sec.insertBefore(title, sec.firstChild);
+  }
+  title.innerHTML = `compute <em>${running}/${containers.length} up</em>`;
+
+  let grid = sec.querySelector('.grid');
+  if (!grid) {
+    grid = document.createElement('div');
+    grid.className = 'grid';
+    sec.appendChild(grid);
+  }
+
+  const seen = new Set();
+  for (const c of containers) {
+    if (isDeployContainer(c.name)) continue;
     const key = `ctr-${c.name}`;
-    const st = containerStatus(c.status);
-    record(key, st === 'ok' ? 10 : 9999);
-    const dot = st;
-    const sparkColor = st === 'ok' ? 'var(--ok)' : st === 'warn' ? 'var(--warn)' : 'var(--down)';
-    // Strip Coolify UUID suffix: name-uuid-timestamp → name
-    const label = c.name.replace(/-[a-z0-9]{20,}-\d+$/, '').replace(/-[a-z0-9]{20,}$/, '');
-    const statusShort = c.status.replace(/\(.*?\)/, '').trim().split(' ').slice(0,3).join(' ');
-    return `
-<div class="card">
-  <div class="card-row">
-    <div class="dot ${dot}"></div>
-    <div class="card-name" style="flex:1" title="${c.name}">${label}</div>
-    <div class="badge">${statusShort}</div>
-  </div>
-  <div class="card-row">
-    <div class="card-sub">${(c.image||'').split(':')[0].split('/').pop()}</div>
-    <div class="spark">${spark(key, sparkColor)}</div>
-  </div>
-</div>`;
-  }).join('');
-  const runningCount = containers.filter(c => containerStatus(c.status) === 'ok').length;
-  document.getElementById('sec-containers').innerHTML = containers.length ? `
-<div class="section-title">Containers <span>${runningCount}/${containers.length} up</span></div>
-<div class="grid">${containerCards}</div>` : '';
+    seen.add(key);
+    const st = cstatus(c.status);
+    hist(key, st === 'ok' ? 5 : 9999);
+    const label = cleanName(c.name);
+    const badge = c.status.replace(/\(.*?\)/,'').trim().split(' ').slice(0,2).join(' ');
+    const img = (c.image||'').split(':')[0].split('/').pop();
 
-  // Tailscale devices
-  const devices = tailscale?.devices || [];
-  const tailscaleError = tailscale?.error;
-  if (tailscaleError) {
-    document.getElementById('sec-tailscale').innerHTML = `
-<div class="section-title">Tailscale <span style="color:var(--warn)">unavailable</span></div>
-<div class="card" style="max-width:360px">
-  <div class="card-row">
-    <div class="dot warn"></div>
-    <div class="card-name" style="flex:1;color:var(--muted)">API unreachable</div>
-  </div>
-</div>`;
-  } else if (devices.length) {
-    const deviceCards = devices.map(d => {
-      const key = `ts-${d.hostname}`;
-      record(key, d.online ? 1 : 9999);
-      const dot = d.online ? 'ok' : 'down';
-      const sparkColor = d.online ? 'var(--ok)' : 'var(--down)';
-      const addr = (d.addresses || [])[0] || '—';
-      const lastSeen = d.lastSeen ? new Date(d.lastSeen).toLocaleDateString('en-GB', {day:'numeric',month:'short'}) : '—';
-      return `
-<div class="card">
-  <div class="card-row">
-    <div class="dot ${dot}"></div>
-    <div class="card-name" style="flex:1">${d.hostname}</div>
-    <div class="badge">${d.os || '—'}</div>
-  </div>
-  <div class="card-row">
-    <div class="card-sub">${addr}</div>
-    <div class="card-sub" style="flex-shrink:0">${d.online ? 'online' : lastSeen}</div>
-  </div>
-</div>`;
-    }).join('');
-    const onlineCount = devices.filter(d => d.online).length;
-    document.getElementById('sec-tailscale').innerHTML = `
-<div class="section-title">Tailscale <span>${onlineCount}/${devices.length} online</span></div>
-<div class="grid grid-wide">${deviceCards}</div>`;
+    if (CARDS[key]) {
+      setCard(key, st, badge, img);
+    } else {
+      grid.appendChild(mkCard(key, label, st, badge, img));
+    }
   }
 
-  // System
-  if (runtime && !runtime.error) {
-    const load = runtime.loadAverage || [0, 0, 0];
-    const uptime = fmtUptime(runtime.uptimeSeconds);
-    document.getElementById('sec-system').innerHTML = `
-<div class="section-title">System <span>${runtime.host || 'vps'}</span></div>
-<div class="card" style="max-width:360px">
-  <div class="sys-row">
-    <div class="sys-item"><div class="sys-label">Load 1m</div><div class="sys-val">${load[0]}</div></div>
-    <div class="sys-item"><div class="sys-label">Load 5m</div><div class="sys-val">${load[1]}</div></div>
-    <div class="sys-item"><div class="sys-label">Load 15m</div><div class="sys-val">${load[2]}</div></div>
-    <div class="sys-item"><div class="sys-label">Uptime</div><div class="sys-val">${uptime}</div></div>
-  </div>
-</div>`;
+  // Remove gone containers
+  for (const key of Object.keys(CARDS)) {
+    if (key.startsWith('ctr-') && !seen.has(key)) {
+      CARDS[key].el.remove();
+      delete CARDS[key];
+    }
   }
 }
 
-// ── Tick ─────────────────────────────────────────────────────────────────────
-let polling = false;
-async function tick() {
-  if (polling) return;
-  polling = true;
+function renderTailscale(ts) {
+  const sec = document.getElementById('sec-tailscale');
+  if (ts.error) {
+    sec.innerHTML = `<div class="sh">mesh <em style="color:var(--down)">unreachable</em></div>`;
+    secTailscaleBuilt = false;
+    return;
+  }
+  const devices = ts.devices || [];
+  const online = devices.filter(d => d.online).length;
+
+  let title = sec.querySelector('.sh');
+  if (!title) {
+    title = document.createElement('div');
+    title.className = 'sh';
+    sec.insertBefore(title, sec.firstChild);
+  }
+  title.innerHTML = `mesh <em>${online}/${devices.length} online</em>`;
+
+  let grid = sec.querySelector('.grid');
+  if (!grid) {
+    grid = document.createElement('div');
+    grid.className = 'grid';
+    sec.appendChild(grid);
+  }
+
+  const seen = new Set();
+  for (const d of devices) {
+    const key = `ts-${d.hostname}-${d.os}`;
+    seen.add(key);
+    const dot = d.online ? 'ok' : 'down';
+    const addr = (d.addresses||[])[0] || '—';
+    const when = d.online ? 'online' : (d.lastSeen ? new Date(d.lastSeen).toLocaleDateString('en-GB',{day:'numeric',month:'short'}) : '—');
+
+    if (CARDS[key]) {
+      CARDS[key].dotEl.className = `dot ${dot}`;
+      if (CARDS[key].whenEl) CARDS[key].whenEl.textContent = when;
+    } else {
+      grid.appendChild(mkDevCard(key, d.hostname, dot, d.os, addr, when));
+    }
+  }
+
+  for (const key of Object.keys(CARDS)) {
+    if (key.startsWith('ts-') && !seen.has(key)) {
+      CARDS[key].el.remove();
+      delete CARDS[key];
+    }
+  }
+}
+
+function renderSystem(runtime) {
+  const sec = document.getElementById('sec-system');
+  if (!runtime || runtime.error) return;
+  const load = runtime.loadAverage || [0,0,0];
+  sec.innerHTML = `
+<div class="sh">system <em>${runtime.host||'vps'}</em></div>
+<div class="card" style="max-width:320px">
+  <div class="sys-g">
+    <div class="si"><div class="sl">load 1m</div><div class="sv">${load[0]}</div></div>
+    <div class="si"><div class="sl">load 5m</div><div class="sv">${load[1]}</div></div>
+    <div class="si"><div class="sl">load 15m</div><div class="sv">${load[2]}</div></div>
+    <div class="si"><div class="sl">uptime</div><div class="sv">${fmtUp(runtime.uptimeSeconds)}</div></div>
+  </div>
+</div>`;
+}
+
+// ── polling ────────────────────────────────────────────────────────────────
+let busy = false;
+const connDot = document.getElementById('conn-dot');
+const connLabel = document.getElementById('conn-label');
+
+async function poll() {
+  if (busy) return;
+  busy = true;
   try {
-    await Promise.all([pollOverseer(), pollStatus()]);
-    document.getElementById('ts').textContent = new Date().toLocaleTimeString();
+    const r = await fetch('/status', { signal: AbortSignal.timeout(9000) });
+    if (!r.ok) throw new Error(`http ${r.status}`);
+    const d = await r.json();
+
+    renderContainers(d.runtime?.containers || []);
+    renderTailscale(d.tailscale || { error: 'no data' });
+    renderSystem(d.runtime);
+
+    connDot.className = 'ok';
+    connLabel.textContent = new Date().toLocaleTimeString();
+    document.getElementById('ts').textContent = new Date().toLocaleDateString('en-GB',{weekday:'short',day:'numeric',month:'short'});
+  } catch (e) {
+    connDot.className = 'err';
+    connLabel.textContent = 'offline';
   } finally {
-    polling = false;
+    busy = false;
   }
 }
 
-tick();
-setInterval(tick, 5000);
+poll();
+setInterval(poll, 7000);
 </script>
 </body>
 </html>
