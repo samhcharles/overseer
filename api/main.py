@@ -10,6 +10,7 @@ import os
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import httpx
 from fastapi import FastAPI, Query
@@ -28,6 +29,8 @@ GROQ_BASE = "https://api.groq.com/openai/v1"
 # Ollama settings (used when backend=ollama, e.g. on Oracle A1)
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:14b")
+
+USER_TIMEZONE = os.environ.get("USER_TIMEZONE", "America/Los_Angeles")
 
 app = FastAPI(title="Overseer API", version="1.0.0")
 
@@ -289,7 +292,153 @@ SKILLS — before performing a complex task, read the relevant skill file first:
 Current facts:
 {facts}
 
-Today: {datetime.now().strftime("%Y-%m-%d, %A")}"""
+Today: {datetime.now(ZoneInfo(USER_TIMEZONE)).strftime("%Y-%m-%d, %A, %H:%M %Z")}"""
+
+
+# ─── entity extraction ────────────────────────────────────────────────────────
+
+async def extract_entities(text: str) -> dict:
+    tz = ZoneInfo(USER_TIMEZONE)
+    local_now = datetime.now(tz)
+    local_dt = local_now.strftime("%Y-%m-%dT%H:%M:%S%z")
+    today = local_now.strftime("%Y-%m-%d")
+
+    prompt = f"""Extract trackable entities from this text. User is Sam, in Seattle (America/Los_Angeles).
+Current local datetime: {local_dt}
+
+Return ONLY valid JSON, no other text:
+{{
+  "people": [{{"name": "string", "relation": "string", "facts": ["string"]}}],
+  "events": [{{"description": "string", "date_hint": "string", "approximate": true}}],
+  "todos": [{{"task": "string", "person": "string or null", "urgency": "normal"}}],
+  "locations": [{{"name": "string", "context": "string"}}],
+  "facts": [{{"category": "preference|recurring|personal", "content": "string"}}]
+}}
+
+Rules:
+- Only include what is explicitly stated. Do not infer.
+- Interpret relative dates relative to {local_dt}.
+- Mark approximate dates with "approximate": true.
+- If nothing to extract for a category, use empty array.
+
+Text: {text}"""
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.post(
+                f"{GROQ_BASE}/chat/completions",
+                headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+                json={"model": GROQ_MODEL, "messages": [{"role": "user", "content": prompt}]},
+            )
+            if not r.is_success:
+                return {"error": f"groq {r.status_code}", "vault_writes": []}
+            raw = r.json()["choices"][0]["message"]["content"]
+        start = raw.find("{")
+        end = raw.rfind("}") + 1
+        entities = json.loads(raw[start:end])
+    except Exception as e:
+        return {"error": str(e), "vault_writes": []}
+
+    vault_writes: list[str] = []
+
+    # People → wiki/personal/people/NAME.md + memory/facts/people.md
+    for person in entities.get("people", []):
+        name = (person.get("name") or "").strip()
+        if not name:
+            continue
+        slug = name.lower().replace(" ", "-")
+        person_path = f"wiki/personal/people/{slug}.md"
+        existing = vault_read(person_path)
+        facts_lines = "\n".join(f"- {f}" for f in person.get("facts", []))
+
+        if "[not found:" in existing:
+            relation = person.get("relation", "")
+            content = (
+                f"---\ntitle: {name}\npartition: personal\ntype: person\nname: {name}\n"
+                f"relationship: {relation}\nbirthday: \nlast_contact: {today}\n"
+                f"tags: [people, personal]\nsources: [overseer]\ncreated: {today}\nupdated: {today}\n---\n\n"
+                f"# {name}\n\nPart of [[personal/MOC|Personal]].\n\n## Facts\n\n{facts_lines}\n\n## Notes\n\n## Interactions\n"
+            )
+        else:
+            if facts_lines and "## Facts" in existing:
+                content = existing.rstrip() + f"\n{facts_lines}\n"
+            else:
+                content = existing
+
+        vault_write(person_path, content, f"overseer: update person {name}")
+        vault_writes.append(person_path)
+
+        if person.get("facts"):
+            facts_file = "memory/facts/people.md"
+            existing_facts = vault_read(facts_file)
+            new_lines = "\n".join(f"- **{name}** — {f} (added {today})" for f in person["facts"])
+            if "[not found:" not in existing_facts:
+                updated = existing_facts.rstrip() + f"\n{new_lines}\n"
+            else:
+                updated = f"---\ntags: [memory, facts, people]\nupdated: {today}\n---\n\n# People Facts\n\n{new_lines}\n"
+            vault_write(facts_file, updated, f"overseer: facts for {name}")
+            vault_writes.append(facts_file)
+
+    # Todos → inbox/yap/DATE-todos.md
+    todos = entities.get("todos", [])
+    if todos:
+        todo_path = f"inbox/yap/{today}-todos.md"
+        existing_todos = vault_read(todo_path)
+        lines = "\n".join(
+            f"- [ ] {t['task']}" + (f" (re: {t['person']})" if t.get("person") else "")
+            for t in todos
+        )
+        if "[not found:" not in existing_todos:
+            updated_todos = existing_todos.rstrip() + f"\n{lines}\n"
+        else:
+            updated_todos = f"---\ndate: {today}\ntags: [inbox, todos]\n---\n\n# Todos {today}\n\n{lines}\n"
+        vault_write(todo_path, updated_todos, f"overseer: todos {today}")
+        vault_writes.append(todo_path)
+
+    # Events → wiki/sessions/events/DATE-slug.md
+    for event in entities.get("events", []):
+        desc = (event.get("description") or "").strip()
+        if not desc:
+            continue
+        date_hint = event.get("date_hint") or today
+        approx = event.get("approximate", False)
+        slug_desc = desc.lower()[:30].replace(" ", "-").replace(",", "").replace(".", "")
+        event_path = f"wiki/sessions/events/{today}-{slug_desc}.md"
+        approx_note = " (approximate)" if approx else ""
+        content = (
+            f"---\ndate: {date_hint}{approx_note}\ntags: [events]\ncreated: {today}\n---\n\n"
+            f"# {desc}\n\nDate: {date_hint}{approx_note}\n"
+        )
+        vault_write(event_path, content, f"overseer: event {slug_desc}")
+        vault_writes.append(event_path)
+
+    # Preferences + personal facts → memory/facts/preferences.md
+    pref_facts = [f for f in entities.get("facts", []) if f.get("category") in ("preference", "personal")]
+    if pref_facts:
+        pref_path = "memory/facts/preferences.md"
+        existing_prefs = vault_read(pref_path)
+        lines = "\n".join(f"- {f['content']} (added {today})" for f in pref_facts)
+        if "[not found:" not in existing_prefs:
+            updated_prefs = existing_prefs.rstrip() + f"\n{lines}\n"
+        else:
+            updated_prefs = f"---\ntags: [memory, facts, preferences]\nupdated: {today}\n---\n\n# Preferences\n\n{lines}\n"
+        vault_write(pref_path, updated_prefs, "overseer: update preferences")
+        vault_writes.append(pref_path)
+
+    # Recurring facts → memory/facts/recurring.md
+    rec_facts = [f for f in entities.get("facts", []) if f.get("category") == "recurring"]
+    if rec_facts:
+        rec_path = "memory/facts/recurring.md"
+        existing_rec = vault_read(rec_path)
+        lines = "\n".join(f"- {f['content']} (added {today})" for f in rec_facts)
+        if "[not found:" not in existing_rec:
+            updated_rec = existing_rec.rstrip() + f"\n{lines}\n"
+        else:
+            updated_rec = f"---\ntags: [memory, facts, recurring]\nupdated: {today}\n---\n\n# Recurring\n\n{lines}\n"
+        vault_write(rec_path, updated_rec, "overseer: update recurring")
+        vault_writes.append(rec_path)
+
+    return {"entities": entities, "vault_writes": vault_writes}
 
 
 # ─── request models ───────────────────────────────────────────────────────────
@@ -307,6 +456,11 @@ class TriageRequest(BaseModel):
 class RememberRequest(BaseModel):
     fact: str
     category: str = "preferences"
+
+
+class ExtractRequest(BaseModel):
+    text: str
+    session_id: str | None = None
 
 
 # ─── endpoints ────────────────────────────────────────────────────────────────
@@ -397,10 +551,17 @@ async def chat(req: ChatRequest):
         answer, tool_log = await run_tool_loop(messages)
         flush_token_ledger()
         update_log(f"Done: {req.message[:60]}", tool_log)
-        return {"response": answer, "tool_calls": tool_log, "backend": OVERSEER_BACKEND}
+        asyncio.create_task(extract_entities(req.message))
+        return {"response": answer, "tool_calls": tool_log, "backend": OVERSEER_BACKEND, "extracted": None}
     except Exception as e:
         import traceback
         return {"response": None, "error": str(e), "trace": traceback.format_exc()[-1000:], "backend": OVERSEER_BACKEND}
+
+
+@app.post("/extract")
+async def extract(req: ExtractRequest):
+    result = await extract_entities(req.text)
+    return result
 
 
 @app.post("/triage")
