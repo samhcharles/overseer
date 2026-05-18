@@ -1,0 +1,62 @@
+services:
+  # Chat UI + nginx proxy
+  overseer-gateway:
+    image: nginx:alpine
+    restart: unless-stopped
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./index.html:/usr/share/nginx/html/index.html:ro
+    networks:
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.overseer.rule=Host(`brain.${DOMAIN}`)"
+      - "traefik.http.routers.overseer.entrypoints=websecure"
+      - "traefik.http.routers.overseer.tls.certresolver=letsencrypt"
+      - "traefik.http.services.overseer.loadbalancer.server.port=80"
+
+  # Overseer API (Groq backend)
+  overseer:
+    image: ${OVERSEER_IMAGE:-overseer-api:latest}
+    restart: unless-stopped
+    environment:
+      - OVERSEER_BACKEND=groq
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - GROQ_MODEL=llama-3.3-70b-versatile
+      - VAULT_PATH=/vault
+    volumes:
+      - vault:/vault
+    networks:
+      - proxy
+
+  # Vault sync every 5 min
+  vault-sync:
+    image: alpine/git
+    restart: unless-stopped
+    volumes:
+      - vault:/vault
+      - ${SSH_KEY_PATH:-/root/.ssh}:/root/.ssh:ro
+    command: >
+      sh -c "
+        git config --global --add safe.directory /vault &&
+        git config --global user.email 'overseer@brain' &&
+        git config --global user.name 'Overseer' &&
+        if [ ! -d /vault/.git ]; then
+          git clone $$VAULT_REPO /vault;
+        fi &&
+        while true; do
+          git -C /vault pull --rebase origin main 2>&1;
+          sleep 300;
+        done
+      "
+    environment:
+      - VAULT_REPO=${VAULT_REPO:-https://github.com/samhcharles/brain.git}
+    networks:
+      - proxy
+
+volumes:
+  vault:
+
+networks:
+  proxy:
+    external: true
