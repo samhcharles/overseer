@@ -331,14 +331,18 @@ async def health():
 
 @app.post("/chat")
 async def chat(req: ChatRequest):
-    update_trace(f"Processing: {req.message[:80]}...")
-    messages = [
-        {"role": "system", "content": system_prompt()},
-        {"role": "user", "content": req.message},
-    ]
-    answer, tool_log = await run_tool_loop(messages)
-    update_trace(f"Done: {req.message[:60]}", tool_log)
-    return {"response": answer, "tool_calls": tool_log, "backend": OVERSEER_BACKEND}
+    try:
+        update_trace(f"Processing: {req.message[:80]}...")
+        messages = [
+            {"role": "system", "content": system_prompt()},
+            {"role": "user", "content": req.message},
+        ]
+        answer, tool_log = await run_tool_loop(messages)
+        update_trace(f"Done: {req.message[:60]}", tool_log)
+        return {"response": answer, "tool_calls": tool_log, "backend": OVERSEER_BACKEND}
+    except Exception as e:
+        import traceback
+        return {"response": None, "error": str(e), "trace": traceback.format_exc()[-1000:], "backend": OVERSEER_BACKEND}
 
 
 @app.post("/triage")
