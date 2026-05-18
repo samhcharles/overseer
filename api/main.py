@@ -199,45 +199,17 @@ async def run_tool_loop(messages: list[dict]) -> tuple[str, list[str]]:
     return "Max tool iterations reached.", tool_log
 
 
-# ─── trace ────────────────────────────────────────────────────────────────────
+# ─── log ──────────────────────────────────────────────────────────────────────
 
-def update_trace(status: str, tool_calls: list[str] | None = None) -> None:
+def update_log(status: str, tool_calls: list[str] | None = None) -> None:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    vault_sync = ""
-    try:
-        r = subprocess.run(["git", "-C", str(VAULT_PATH), "log", "-1", "--format=%ar"], capture_output=True, text=True)
-        vault_sync = r.stdout.strip()
-    except Exception:
-        vault_sync = "unknown"
-
     backend_label = f"Groq/{GROQ_MODEL}" if OVERSEER_BACKEND == "groq" else f"Ollama/{OLLAMA_MODEL}"
-    tool_lines = "\n".join(f"- `{t}`" for t in (tool_calls or [])[-5:]) or "*No tool calls this session.*"
-
-    content = f"""---
-tags: [overseer, trace]
----
-
-# Overseer — Live Trace
-
-> This file is written by Overseer during active sessions. Refresh to see current activity.
-
-## Status
-- **Last active:** {now}
-- **Backend:** {backend_label}
-- **Vault sync:** {vault_sync}
-
-## Current session
-
-{status}
-
-## Last tool calls
-
-{tool_lines}
-"""
-    trace_path = VAULT_PATH / "memory" / "overseer-live.md"
+    tool_lines = "\n".join(f"- `{t}`" for t in (tool_calls or [])[-10:]) or "*no calls*"
+    content = f"---\ntags: [overseer, log]\n---\n\n# Overseer Log\n\n- **{now}** — {backend_label}\n- {status}\n\n## Last calls\n\n{tool_lines}\n"
+    log_path = VAULT_PATH / "memory" / "overseer-live.md"
     try:
-        trace_path.parent.mkdir(parents=True, exist_ok=True)
-        trace_path.write_text(content)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(content)
     except Exception:
         pass
 
@@ -255,25 +227,46 @@ def system_prompt() -> str:
                 pass
     facts = "".join(facts_sections) or "[none yet]"
 
-    return f"""You are Overseer. You route raw data into the vault and retrieve it on demand. Nothing else.
+    skills_index = ""
+    skills_dir = VAULT_PATH / "overseer" / "skills"
+    if skills_dir.exists():
+        for d in sorted(p for p in skills_dir.iterdir() if p.is_dir()):
+            sf = d / "SKILL.md"
+            if sf.exists():
+                first_line = sf.read_text().splitlines()[0].lstrip("#").strip()
+                skills_index += f"\n- {d.name}: {first_line}"
+
+    return f"""You are Overseer. You route raw data into the vault and retrieve it on demand.
 
 RULES:
 - No greetings. No self-introduction. No "I've noted that". No suggestions. No filler.
-- Storing data: do it, then confirm in one line (what + where). Nothing more.
+- Storing data: do it silently, confirm in one line (what + where).
 - Answering questions: vault_search first. Return exactly what you find. If nothing: "[not found]".
-- Never invent, infer, or pad. Only state what is in the vault.
-- Responses are terse. One or two sentences max unless the user explicitly asks for more.
+- Never invent or infer. Only state what is in the vault.
+- Responses are terse — one or two sentences unless more is explicitly requested.
+- If date or time is missing from an event, ask exactly one question to get it.
 
-ROUTING — when the user gives you raw data, route it silently:
-- New person or relationship → vault_write to wiki/personal/people/[firstname].md
-- Birthday or personal fact about someone → append to memory/facts/people.md AND the person note
-- Preference or default setting → append to memory/facts/preferences.md
-- Recurring schedule or event → append to memory/facts/recurring.md
-- Project info → vault_write to wiki/projects/[project-name].md
-- System or infra info → vault_write to wiki/systems/[name].md
-- Any other raw note → vault_write to inbox/yap/[slug].md
+NO DRIFT — every write must keep the vault consistent:
+- Storing a person fact: write to BOTH memory/facts/people.md AND wiki/personal/people/[name].md
+- Storing a system change: write to BOTH memory/facts/ AND the relevant wiki/systems/[name].md
+- Before writing to any wiki page, vault_read it first and merge — never overwrite, only append or update
+- Tags must be lowercase kebab-case, consistent with existing tags on the page
+- Dates must always be included: format YYYY-MM-DD
 
-RECALL — before answering any question about stored data, always vault_search first.
+ROUTING — when the user gives raw data, route it:
+- Person, relationship, contact → wiki/personal/people/[firstname].md (read templates/person.md first)
+- Birthday or fact about someone → memory/facts/people.md + person note
+- Personal preference or default → memory/facts/preferences.md
+- Recurring schedule or event → memory/facts/recurring.md
+- Event that happened → wiki/sessions/events/[YYYY-MM-DD]-[slug].md
+- Project info → wiki/projects/[project-name].md (read templates/project.md first)
+- System or infra change → wiki/systems/[name].md (read templates/system.md first)
+- Session/work debrief → wiki/sessions/[YYYY-MM-DD]-[slug].md
+- Anything else raw → inbox/yap/[YYYY-MM-DD]-[slug].md
+
+SKILLS — read a skill before performing its task:
+{skills_index or "- [no skills loaded]"}
+Read with: vault_read("overseer/skills/[name]/SKILL.md")
 
 Current memory facts:
 {facts}
@@ -353,14 +346,14 @@ def flush_token_ledger() -> None:
 @app.post("/chat")
 async def chat(req: ChatRequest):
     try:
-        update_trace(f"Processing: {req.message[:80]}...")
+        update_log(f"Processing: {req.message[:80]}...")
         messages = [
             {"role": "system", "content": system_prompt()},
             {"role": "user", "content": req.message},
         ]
         answer, tool_log = await run_tool_loop(messages)
         flush_token_ledger()
-        update_trace(f"Done: {req.message[:60]}", tool_log)
+        update_log(f"Done: {req.message[:60]}", tool_log)
         return {"response": answer, "tool_calls": tool_log, "backend": OVERSEER_BACKEND}
     except Exception as e:
         import traceback
@@ -423,17 +416,17 @@ async def recall(q: str = Query(...)):
     return {"query": q, "results": results}
 
 
-@app.get("/trace")
-async def trace():
+@app.get("/logs")
+async def logs():
     async def gen():
-        trace_path = VAULT_PATH / "memory" / "overseer-live.md"
+        log_path = VAULT_PATH / "memory" / "overseer-live.md"
         last_mtime = 0.0
         for _ in range(120):
             try:
-                mtime = trace_path.stat().st_mtime
+                mtime = log_path.stat().st_mtime
                 if mtime != last_mtime:
                     last_mtime = mtime
-                    content = trace_path.read_text()
+                    content = log_path.read_text()
                     yield f"data: {json.dumps({'content': content})}\n\n"
             except Exception:
                 pass
