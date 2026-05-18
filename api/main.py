@@ -155,6 +155,11 @@ async def _gemini_chat(messages: list[dict]) -> dict:
             json=payload,
         )
         if not r.is_success:
+            # On quota/rate limit, fall back to Groq if key is available
+            if r.status_code in (429, 503) and GROQ_API_KEY:
+                import logging
+                logging.warning(f"Gemini {r.status_code} — falling back to Groq")
+                return await _groq_chat(messages)
             raise RuntimeError(f"Gemini {r.status_code}: {r.text[:500]}")
         data = r.json()
         token_ledger[GEMINI_MODEL] = token_ledger.get(GEMINI_MODEL, 0) + data.get("usage", {}).get("total_tokens", 0)
