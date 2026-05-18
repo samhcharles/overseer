@@ -48,9 +48,13 @@ def vault_write(path: str, content: str, commit_msg: str | None = None) -> str:
     full.write_text(content)
     msg = commit_msg or f"overseer: update {path}"
     try:
-        subprocess.run(["git", "-C", str(VAULT_PATH), "add", str(full)], check=True, capture_output=True)
-        subprocess.run(["git", "-C", str(VAULT_PATH), "commit", "-m", msg], check=True, capture_output=True)
-        subprocess.run(["git", "-C", str(VAULT_PATH), "push", "origin", "main"], check=True, capture_output=True)
+        git = ["git", "-C", str(VAULT_PATH)]
+        subprocess.run(git + ["config", "--global", "--add", "safe.directory", str(VAULT_PATH)], capture_output=True)
+        subprocess.run(git + ["config", "user.email", "overseer@brain"], capture_output=True)
+        subprocess.run(git + ["config", "user.name", "Overseer"], capture_output=True)
+        subprocess.run(git + ["add", str(full)], check=True, capture_output=True)
+        subprocess.run(git + ["commit", "-m", msg], check=True, capture_output=True)
+        subprocess.run(git + ["push", "origin", "main"], check=True, capture_output=True)
     except subprocess.CalledProcessError as e:
         return f"wrote {path} but git error: {e.stderr.decode()[:200]}"
     return f"wrote and committed {path}"
@@ -241,12 +245,6 @@ tags: [overseer, trace]
 # ─── system prompt ────────────────────────────────────────────────────────────
 
 def system_prompt() -> str:
-    vault_index = "[unavailable]"
-    try:
-        vault_index = (VAULT_PATH / "wiki" / "_index.md").read_text()[:2000]
-    except Exception:
-        pass
-
     facts_sections = []
     facts_dir = VAULT_PATH / "memory" / "facts"
     if facts_dir.exists():
@@ -257,20 +255,25 @@ def system_prompt() -> str:
                 pass
     facts = "".join(facts_sections) or "[none yet]"
 
-    return f"""You are Overseer, the user's personal AI with deep knowledge of their second brain vault.
+    return f"""You are Overseer. You route raw data into the vault and retrieve it on demand. Nothing else.
 
-You have tools to read, search, and write to the vault. Use them freely.
+RULES:
+- No greetings. No self-introduction. No "I've noted that". No suggestions. No filler.
+- Storing data: do it, then confirm in one line (what + where). Nothing more.
+- Answering questions: vault_search first. Return exactly what you find. If nothing: "[not found]".
+- Never invent, infer, or pad. Only state what is in the vault.
+- Responses are terse. One or two sentences max unless the user explicitly asks for more.
 
-When the user mentions something new (a person, a date, a birthday, a preference, an event):
-- New person: write to wiki/personal/people/[name].md (use templates/person.md as format guide)
-- Birthday or personal fact about someone: append to memory/facts/people.md AND the person note
-- Preference or default: append to memory/facts/preferences.md
-- Recurring event/schedule: append to memory/facts/recurring.md
+ROUTING — when the user gives you raw data, route it silently:
+- New person or relationship → vault_write to wiki/personal/people/[firstname].md
+- Birthday or personal fact about someone → append to memory/facts/people.md AND the person note
+- Preference or default setting → append to memory/facts/preferences.md
+- Recurring schedule or event → append to memory/facts/recurring.md
+- Project info → vault_write to wiki/projects/[project-name].md
+- System or infra info → vault_write to wiki/systems/[name].md
+- Any other raw note → vault_write to inbox/yap/[slug].md
 
-Always search the vault before answering questions about past events, people, or stored facts.
-
-Current vault index:
-{vault_index}
+RECALL — before answering any question about stored data, always vault_search first.
 
 Current memory facts:
 {facts}
@@ -330,6 +333,18 @@ async def health():
     }
 
 
+def flush_token_ledger() -> None:
+    usage_path = VAULT_PATH / "memory" / "usage.md"
+    try:
+        usage_path.parent.mkdir(parents=True, exist_ok=True)
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        lines = [f"| {model} | {tokens} | {now} |" for model, tokens in token_ledger.items()]
+        header = "| Model | Total Tokens | Last Updated |\n|---|---|---|\n"
+        usage_path.write_text(f"# Token Usage\n\n{header}" + "\n".join(lines) + "\n")
+    except Exception:
+        pass
+
+
 @app.post("/chat")
 async def chat(req: ChatRequest):
     try:
@@ -339,6 +354,7 @@ async def chat(req: ChatRequest):
             {"role": "user", "content": req.message},
         ]
         answer, tool_log = await run_tool_loop(messages)
+        flush_token_ledger()
         update_trace(f"Done: {req.message[:60]}", tool_log)
         return {"response": answer, "tool_calls": tool_log, "backend": OVERSEER_BACKEND}
     except Exception as e:
