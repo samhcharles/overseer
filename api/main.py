@@ -230,7 +230,11 @@ tags: [overseer, trace]
 {tool_lines}
 """
     trace_path = VAULT_PATH / "memory" / "overseer-live.md"
-    trace_path.write_text(content)
+    try:
+        trace_path.parent.mkdir(parents=True, exist_ok=True)
+        trace_path.write_text(content)
+    except Exception:
+        pass
 
 
 # ─── system prompt ────────────────────────────────────────────────────────────
