@@ -308,19 +308,22 @@ async def dashboard_ui():
 @app.get("/status")
 async def status():
     """Aggregate founder-helper data server-side to avoid browser CORS."""
-    async def fetch(path: str) -> dict:
+    async def fetch(path: str, timeout: float = 5.0) -> dict:
         try:
-            async with httpx.AsyncClient(timeout=5) as c:
+            async with httpx.AsyncClient(timeout=timeout) as c:
                 r = await c.get(f"{FOUNDER_URL}{path}")
-                return r.json() if r.is_success else {"error": f"http {r.status_code}"}
+                if r.is_success:
+                    return r.json()
+                return {"error": f"http {r.status_code}"}
         except Exception as e:
-            return {"error": str(e)[:120]}
+            return {"error": type(e).__name__, "detail": str(e)[:120]}
 
-    runtime, devices = await asyncio.gather(
-        fetch("/runtime/summary"),
-        fetch("/tailscale/devices"),
+    # Tailscale is slow (API call); use longer timeout but cap it
+    runtime, tailscale = await asyncio.gather(
+        fetch("/runtime/summary", timeout=5.0),
+        fetch("/tailscale/devices", timeout=8.0),
     )
-    return {"runtime": runtime, "tailscale": devices}
+    return {"runtime": runtime, "tailscale": tailscale}
 
 
 @app.get("/health")

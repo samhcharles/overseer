@@ -242,18 +242,18 @@ async function pollStatus() {
   const containerCards = containers.map(c => {
     const key = `ctr-${c.name}`;
     const st = containerStatus(c.status);
-    const fakeMs = st === 'ok' ? 10 : null;
-    record(key, fakeMs ?? 9999);
+    record(key, st === 'ok' ? 10 : 9999);
     const dot = st;
-    const lc = st === 'ok' ? 'ok' : 'down';
-    const sparkColor = st === 'ok' ? 'var(--ok)' : 'var(--down)';
-    const label = c.name.replace(/^[a-z0-9]+-[a-z0-9]+-/, '').replace(/-/g, '-');
+    const sparkColor = st === 'ok' ? 'var(--ok)' : st === 'warn' ? 'var(--warn)' : 'var(--down)';
+    // Strip Coolify UUID suffix: name-uuid-timestamp → name
+    const label = c.name.replace(/-[a-z0-9]{20,}-\d+$/, '').replace(/-[a-z0-9]{20,}$/, '');
+    const statusShort = c.status.replace(/\(.*?\)/, '').trim().split(' ').slice(0,3).join(' ');
     return `
 <div class="card">
   <div class="card-row">
     <div class="dot ${dot}"></div>
-    <div class="card-name" style="flex:1">${c.name}</div>
-    <div class="badge">${c.status.split(' ').slice(0,2).join(' ')}</div>
+    <div class="card-name" style="flex:1" title="${c.name}">${label}</div>
+    <div class="badge">${statusShort}</div>
   </div>
   <div class="card-row">
     <div class="card-sub">${(c.image||'').split(':')[0].split('/').pop()}</div>
@@ -268,15 +268,25 @@ async function pollStatus() {
 
   // Tailscale devices
   const devices = tailscale?.devices || [];
-  const deviceCards = devices.map(d => {
-    const key = `ts-${d.hostname}`;
-    const ms = d.online ? 1 : null;
-    record(key, ms ?? 9999);
-    const dot = d.online ? 'ok' : 'down';
-    const sparkColor = d.online ? 'var(--ok)' : 'var(--down)';
-    const addr = (d.addresses || [])[0] || '—';
-    const lastSeen = d.lastSeen ? new Date(d.lastSeen).toLocaleDateString('en-GB', {day:'numeric',month:'short'}) : '—';
-    return `
+  const tailscaleError = tailscale?.error;
+  if (tailscaleError) {
+    document.getElementById('sec-tailscale').innerHTML = `
+<div class="section-title">Tailscale <span style="color:var(--warn)">unavailable</span></div>
+<div class="card" style="max-width:360px">
+  <div class="card-row">
+    <div class="dot warn"></div>
+    <div class="card-name" style="flex:1;color:var(--muted)">API unreachable</div>
+  </div>
+</div>`;
+  } else if (devices.length) {
+    const deviceCards = devices.map(d => {
+      const key = `ts-${d.hostname}`;
+      record(key, d.online ? 1 : 9999);
+      const dot = d.online ? 'ok' : 'down';
+      const sparkColor = d.online ? 'var(--ok)' : 'var(--down)';
+      const addr = (d.addresses || [])[0] || '—';
+      const lastSeen = d.lastSeen ? new Date(d.lastSeen).toLocaleDateString('en-GB', {day:'numeric',month:'short'}) : '—';
+      return `
 <div class="card">
   <div class="card-row">
     <div class="dot ${dot}"></div>
@@ -288,11 +298,12 @@ async function pollStatus() {
     <div class="card-sub" style="flex-shrink:0">${d.online ? 'online' : lastSeen}</div>
   </div>
 </div>`;
-  }).join('');
-  const onlineCount = devices.filter(d => d.online).length;
-  document.getElementById('sec-tailscale').innerHTML = devices.length ? `
+    }).join('');
+    const onlineCount = devices.filter(d => d.online).length;
+    document.getElementById('sec-tailscale').innerHTML = `
 <div class="section-title">Tailscale <span>${onlineCount}/${devices.length} online</span></div>
-<div class="grid grid-wide">${deviceCards}</div>` : '';
+<div class="grid grid-wide">${deviceCards}</div>`;
+  }
 
   // System
   if (runtime && !runtime.error) {
