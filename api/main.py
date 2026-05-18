@@ -8,7 +8,9 @@ Backends (OVERSEER_BACKEND env var):
 import asyncio
 import json
 import os
+import re
 import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -42,6 +44,14 @@ USER_TIMEZONE = os.environ.get("USER_TIMEZONE", "America/Los_Angeles")
 app = FastAPI(title="Overseer API", version="1.0.0")
 
 token_ledger: dict[str, int] = {}
+
+_system_prompt_cache: tuple[float, str] | None = None
+_SYSTEM_PROMPT_TTL = 300  # 5 minutes
+
+_SKIP_EXTRACTION_RE = re.compile(
+    r"^\s*(hi|hello|hey|ok|k|thanks|thx|sure|yes|no|yep|nope|cool|got it|lol|haha|bye|done|nice)\W*$",
+    re.IGNORECASE,
+)
 
 
 # ─── vault tools ──────────────────────────────────────────────────────────────
@@ -158,13 +168,17 @@ async def _gemini_chat(messages: list[dict]) -> dict:
             # On quota/rate limit, fall back to Groq if key is available
             if r.status_code in (429, 503) and GROQ_API_KEY:
                 import logging
-                logging.warning(f"Gemini {r.status_code} — falling back to Groq")
-                return await _groq_chat(messages)
+                status_code = r.status_code
+                logging.warning(f"Gemini {status_code} — falling back to Groq")
+                result = await _groq_chat(messages)
+                result["_backend_used"] = "groq"
+                result["_fallback_reason"] = f"gemini {status_code}"
+                return result
             raise RuntimeError(f"Gemini {r.status_code}: {r.text[:500]}")
         data = r.json()
         token_ledger[GEMINI_MODEL] = token_ledger.get(GEMINI_MODEL, 0) + data.get("usage", {}).get("total_tokens", 0)
         choice = data["choices"][0]["message"]
-        return {"content": choice.get("content") or "", "tool_calls": choice.get("tool_calls") or []}
+        return {"content": choice.get("content") or "", "tool_calls": choice.get("tool_calls") or [], "_backend_used": "gemini"}
 
 
 async def _groq_chat(messages: list[dict]) -> dict:
@@ -195,12 +209,12 @@ async def _groq_chat(messages: list[dict]) -> dict:
                 if r2.is_success:
                     data2 = r2.json()
                     token_ledger[GROQ_MODEL] = token_ledger.get(GROQ_MODEL, 0) + data2.get("usage", {}).get("total_tokens", 0)
-                    return {"content": data2["choices"][0]["message"].get("content") or "", "tool_calls": []}
+                    return {"content": data2["choices"][0]["message"].get("content") or "", "tool_calls": [], "_backend_used": "groq"}
             raise RuntimeError(f"Groq {r.status_code}: {r.text[:500]}")
         data = r.json()
         token_ledger[GROQ_MODEL] = token_ledger.get(GROQ_MODEL, 0) + data.get("usage", {}).get("total_tokens", 0)
         choice = data["choices"][0]["message"]
-        return {"content": choice.get("content") or "", "tool_calls": choice.get("tool_calls") or []}
+        return {"content": choice.get("content") or "", "tool_calls": choice.get("tool_calls") or [], "_backend_used": "groq"}
 
 
 async def _ollama_chat(messages: list[dict]) -> dict:
@@ -210,7 +224,7 @@ async def _ollama_chat(messages: list[dict]) -> dict:
         r.raise_for_status()
         data = r.json()
         msg = data.get("message", {})
-        return {"content": msg.get("content") or "", "tool_calls": msg.get("tool_calls") or []}
+        return {"content": msg.get("content") or "", "tool_calls": msg.get("tool_calls") or [], "_backend_used": "ollama"}
 
 
 async def llm_chat(messages: list[dict]) -> dict:
@@ -221,15 +235,19 @@ async def llm_chat(messages: list[dict]) -> dict:
     return await _gemini_chat(messages)
 
 
-async def run_tool_loop(messages: list[dict]) -> tuple[str, list[str]]:
+async def run_tool_loop(messages: list[dict]) -> tuple[str, list[str], str, str | None]:
     tool_log: list[str] = []
+    backend_used = OVERSEER_BACKEND
+    fallback_reason: str | None = None
     for _ in range(10):
         response = await llm_chat(messages)
         content = response["content"]
         tool_calls = response["tool_calls"]
+        backend_used = response.get("_backend_used", OVERSEER_BACKEND)
+        fallback_reason = response.get("_fallback_reason")
 
         if not tool_calls:
-            return content, tool_log
+            return content, tool_log, backend_used, fallback_reason
 
         # Groq format: tool_calls is list of {id, type, function: {name, arguments}}
         # Ollama format: list of {function: {name, arguments}}
@@ -253,7 +271,7 @@ async def run_tool_loop(messages: list[dict]) -> tuple[str, list[str]]:
                 tool_msg["tool_call_id"] = tc["id"]
             messages.append(tool_msg)
 
-    return "Max tool iterations reached.", tool_log
+    return "Max tool iterations reached.", tool_log, backend_used, fallback_reason
 
 
 # ─── log ──────────────────────────────────────────────────────────────────────
@@ -278,16 +296,21 @@ def update_log(status: str, tool_calls: list[str] | None = None) -> None:
 
 # ─── system prompt ────────────────────────────────────────────────────────────
 
-def system_prompt() -> str:
-    facts_sections = []
+def _build_system_prompt() -> str:
+    FACTS_CAP = 2000
+    facts_buf = ""
     facts_dir = VAULT_PATH / "memory" / "facts"
     if facts_dir.exists():
         for f in sorted(facts_dir.glob("*.md")):
             try:
-                facts_sections.append(f"\n### {f.stem}\n{f.read_text()[:600]}")
+                chunk = f"\n### {f.stem}\n{f.read_text()[:600]}"
+                if len(facts_buf) + len(chunk) > FACTS_CAP:
+                    facts_buf += "\n[facts truncated — use vault_search for more]"
+                    break
+                facts_buf += chunk
             except Exception:
                 pass
-    facts = "".join(facts_sections) or "[none yet]"
+    facts = facts_buf or "[none yet]"
 
     skills_index = ""
     skills_dir = VAULT_PATH / "overseer" / "skills"
@@ -335,9 +358,23 @@ Current facts:
 Today: {datetime.now(ZoneInfo(USER_TIMEZONE)).strftime("%Y-%m-%d, %A, %H:%M %Z")}"""
 
 
+def system_prompt() -> str:
+    global _system_prompt_cache
+    now = time.monotonic()
+    if _system_prompt_cache and now - _system_prompt_cache[0] < _SYSTEM_PROMPT_TTL:
+        return _system_prompt_cache[1]
+    prompt = _build_system_prompt()
+    _system_prompt_cache = (now, prompt)
+    return prompt
+
+
 # ─── entity extraction ────────────────────────────────────────────────────────
 
 async def extract_entities(text: str) -> dict:
+    words = text.split()
+    if len(words) < 5 or _SKIP_EXTRACTION_RE.match(text):
+        return {"entities": {}, "vault_writes": [], "skipped": True}
+
     tz = ZoneInfo(USER_TIMEZONE)
     local_now = datetime.now(tz)
     local_dt = local_now.strftime("%Y-%m-%dT%H:%M:%S%z")
@@ -595,13 +632,20 @@ async def chat(req: ChatRequest):
             {"role": "system", "content": system_prompt()},
             {"role": "user", "content": req.message},
         ]
-        answer, tool_log = await run_tool_loop(messages)
+        answer, tool_log, backend_used, fallback_reason = await run_tool_loop(messages)
         flush_token_ledger()
         update_log(f"Done: {req.message[:60]}", tool_log)
-        return {"response": answer, "tool_calls": tool_log, "backend": OVERSEER_BACKEND, "extracted": None}
+        return {
+            "response": answer,
+            "tool_calls": tool_log,
+            "backend": OVERSEER_BACKEND,
+            "backend_used": backend_used,
+            "fallback_reason": fallback_reason,
+            "extracted": None,
+        }
     except Exception as e:
         import traceback
-        return {"response": None, "error": str(e), "trace": traceback.format_exc()[-1000:], "backend": OVERSEER_BACKEND}
+        return {"response": None, "error": str(e), "trace": traceback.format_exc()[-1000:], "backend": OVERSEER_BACKEND, "backend_used": OVERSEER_BACKEND, "fallback_reason": None}
 
 
 @app.post("/extract")
