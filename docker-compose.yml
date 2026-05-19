@@ -12,6 +12,7 @@ services:
       - OPENROUTER_MODEL=${OPENROUTER_MODEL:-google/gemini-2.0-flash-exp:free}
       - WORKER_URL=${WORKER_URL}
       - WORKER_SECRET=${WORKER_SECRET}
+      - OVERSEER_API_KEY=${OVERSEER_API_KEY}
       - VAULT_PATH=/vault
       - USER_TIMEZONE=${USER_TIMEZONE:-America/Los_Angeles}
     ports:

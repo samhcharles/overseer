@@ -1,4 +1,10 @@
-import { API_URL } from "./config.js";
+import { API_KEY, API_URL } from "./config.js";
+
+function authHeaders() {
+  const h = { "Content-Type": "application/json" };
+  if (API_KEY) h["Authorization"] = `Bearer ${API_KEY}`;
+  return h;
+}
 
 export async function fetchHealth(signal) {
   const r = await fetch(`${API_URL}/health`, { signal });
@@ -9,7 +15,7 @@ export async function fetchHealth(signal) {
 export async function sendChat(message, signal) {
   const r = await fetch(`${API_URL}/chat`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders(),
     body: JSON.stringify({ message }),
     signal,
   });

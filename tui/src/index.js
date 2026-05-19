@@ -1,5 +1,11 @@
 #!/usr/bin/env node
-import { API_URL, VERSION } from "./config.js";
+import { API_KEY, API_URL, VERSION } from "./config.js";
+
+function authHeaders() {
+  const h = { "Content-Type": "application/json" };
+  if (API_KEY) h["Authorization"] = `Bearer ${API_KEY}`;
+  return h;
+}
 
 // ── one-shot mode ─────────────────────────────────────────────────────────────
 
@@ -21,7 +27,7 @@ if (arg) {
   try {
     const r = await fetch(`${API_URL}/chat`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders(),
       body: JSON.stringify({ message: process.argv.slice(2).join(" ") }),
       signal: AbortSignal.timeout(90000),
     });
@@ -196,7 +202,7 @@ function App() {
         try {
           const r = await fetch(`${API_URL}/extract`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: authHeaders(),
             body: JSON.stringify({ text, session_id: sessionId }),
             signal: AbortSignal.timeout(30000),
           });

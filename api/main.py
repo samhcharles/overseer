@@ -17,8 +17,9 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import httpx
-from fastapi import FastAPI, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
 VAULT_PATH = Path(os.environ.get("VAULT_PATH", "/home/ubuntu/vault"))
@@ -49,9 +50,21 @@ OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:14b")
 WORKER_URL = os.environ.get("WORKER_URL", "")
 WORKER_SECRET = os.environ.get("WORKER_SECRET", "")
 
+# API auth — if set, all endpoints except /health require Bearer token
+OVERSEER_API_KEY = os.environ.get("OVERSEER_API_KEY", "")
+
 USER_TIMEZONE = os.environ.get("USER_TIMEZONE", "America/Los_Angeles")
 
 app = FastAPI(title="Overseer API", version="1.0.0")
+
+_bearer = HTTPBearer(auto_error=False)
+
+
+def _auth(credentials: HTTPAuthorizationCredentials | None = Depends(_bearer)) -> None:
+    if not OVERSEER_API_KEY:
+        return  # no key configured — allow all (backward compat during rollout)
+    if not credentials or credentials.credentials != OVERSEER_API_KEY:
+        raise HTTPException(status_code=401, detail="unauthorized")
 
 token_ledger: dict[str, int] = {}
 
@@ -258,15 +271,34 @@ async def _gemini_chat(messages: list[dict]) -> dict:
             json=payload,
         )
         if not r.is_success:
-            # On quota/rate limit, fall back to Groq if key is available
-            if r.status_code in (429, 503) and GROQ_API_KEY:
+            if r.status_code in (429, 503):
                 import logging
-                status_code = r.status_code
-                logging.warning(f"Gemini {status_code} — falling back to Groq")
-                result = await _groq_chat(messages)
-                result["_backend_used"] = "groq"
-                result["_fallback_reason"] = f"gemini {status_code}"
-                return result
+                fallback_reason = f"gemini {r.status_code}"
+                logging.warning(f"Gemini {r.status_code} — trying fallbacks")
+                if GROQ_API_KEY:
+                    try:
+                        result = await _groq_chat(messages)
+                        result["_backend_used"] = "groq"
+                        result["_fallback_reason"] = fallback_reason
+                        return result
+                    except Exception as groq_err:
+                        fallback_reason += f", groq failed"
+                        logging.warning(f"Groq also failed: {groq_err}")
+                if OPENROUTER_API_KEY and OPENROUTER_MODEL.endswith(":free"):
+                    try:
+                        result = await _openrouter_chat(messages)
+                        result["_backend_used"] = "openrouter"
+                        result["_fallback_reason"] = fallback_reason
+                        return result
+                    except Exception as or_err:
+                        fallback_reason += f", openrouter failed"
+                        logging.warning(f"OpenRouter also failed: {or_err}")
+                return {
+                    "content": "All backends are rate-limited right now. Gemini resets in ~1h, Groq in ~8h. Try again later.",
+                    "tool_calls": [],
+                    "_backend_used": "none",
+                    "_fallback_reason": fallback_reason,
+                }
             raise RuntimeError(f"Gemini {r.status_code}: {r.text[:500]}")
         data = r.json()
         token_ledger[GEMINI_MODEL] = token_ledger.get(GEMINI_MODEL, 0) + data.get("usage", {}).get("total_tokens", 0)
@@ -667,17 +699,17 @@ class ExtractRequest(BaseModel):
 # ─── endpoints ────────────────────────────────────────────────────────────────
 
 @app.get("/")
-async def root():
+async def root(_: None = Depends(_auth)):
     return FileResponse(Path(__file__).parent / "index.html")
 
 
 @app.get("/dashboard")
-async def dashboard_ui():
+async def dashboard_ui(_: None = Depends(_auth)):
     return FileResponse(Path(__file__).parent / "dashboard.html")
 
 
 @app.get("/status")
-async def status():
+async def status(_: None = Depends(_auth)):
     """Aggregate founder-helper data server-side to avoid browser CORS."""
     async def fetch(path: str, timeout: float = 5.0) -> dict:
         try:
@@ -753,7 +785,7 @@ def flush_token_ledger() -> None:
 
 
 @app.post("/chat")
-async def chat(req: ChatRequest):
+async def chat(req: ChatRequest, _: None = Depends(_auth)):
     try:
         update_log(f"Processing: {req.message[:80]}...")
         messages = [
@@ -777,13 +809,13 @@ async def chat(req: ChatRequest):
 
 
 @app.post("/extract")
-async def extract(req: ExtractRequest):
+async def extract(req: ExtractRequest, _: None = Depends(_auth)):
     result = await extract_entities(req.text)
     return result
 
 
 @app.post("/triage")
-async def triage(req: TriageRequest):
+async def triage(req: TriageRequest, _: None = Depends(_auth)):
     triage_prompt = f"""Triage this inbox item from source: {req.source}
 
 Return ONLY valid JSON:
@@ -821,7 +853,7 @@ Content:
 
 
 @app.post("/remember")
-async def remember(req: RememberRequest):
+async def remember(req: RememberRequest, _: None = Depends(_auth)):
     valid = {"people", "preferences", "recurring"}
     category = req.category if req.category in valid else "preferences"
     facts_path = f"memory/facts/{category}.md"
@@ -833,13 +865,13 @@ async def remember(req: RememberRequest):
 
 
 @app.get("/recall")
-async def recall(q: str = Query(...)):
+async def recall(q: str = Query(...), _: None = Depends(_auth)):
     results = vault_search(q)
     return {"query": q, "results": results}
 
 
 @app.get("/logs")
-async def logs():
+async def logs(_: None = Depends(_auth)):
     async def gen():
         log_path = VAULT_PATH / "memory" / "overseer-live.md"
         last_mtime = 0.0
