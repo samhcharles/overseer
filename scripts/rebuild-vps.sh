@@ -18,7 +18,15 @@ ssh -o StrictHostKeyChecking=no "${VPS}" "
   rm -rf /tmp/osgw
   git clone --depth=1 https://\${GIT_USER}:\${GIT_TOKEN}@github.com/samhcharles/overseer.git /tmp/osgw
   docker build -t ${IMAGE} /tmp/osgw/api
-  sed -i \"s|image: '.*overseer:.*'|image: '${IMAGE}'|\" ${APP_DIR}/docker-compose.yaml
+  python3 -c \"
+import yaml
+path = '${APP_DIR}/docker-compose.yaml'
+with open(path) as f: c = yaml.safe_load(f)
+c['services']['overseer']['image'] = '${IMAGE}'
+c['services']['overseer'].pop('build', None)
+with open(path, 'w') as f: yaml.dump(c, f, default_flow_style=False)
+print('image set to ${IMAGE}')
+\"
   cd ${APP_DIR}
   docker compose -f docker-compose.yaml --env-file .env up -d --no-deps overseer
   echo 'restarted'
