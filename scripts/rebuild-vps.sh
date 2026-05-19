@@ -9,7 +9,7 @@ APP_DIR=/data/coolify/applications/lhqks3whe00kfb9tvrb6ocgh
 IMAGE="lhqks3whe00kfb9tvrb6ocgh_overseer:${COMMIT}"
 VPS=root@100.73.12.59
 
-source ~/.secrets/master.env 2>/dev/null
+source ~/.secrets/master.env 2>/dev/null || true
 
 echo "→ building ${IMAGE} on VPS at ${VPS}"
 ssh -o StrictHostKeyChecking=no "${VPS}" "
