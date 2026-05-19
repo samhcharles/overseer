@@ -44,14 +44,13 @@ if (arg) {
 
 import React, { useState, useEffect, useRef } from "react";
 import { render, Box, Text, useInput, useApp, useStdout } from "ink";
-import { Banner } from "./components/Banner.jsx";
-import { InfoPanel } from "./components/InfoPanel.jsx";
+import { IntroBanner, Sprite } from "./components/Banner.jsx";
 import { StatusBar } from "./components/StatusBar.jsx";
 import { ThinkingDots } from "./components/ThinkingDots.jsx";
 import { SessionManager } from "./components/SessionManager.jsx";
 import { ExtractionLog } from "./components/ExtractionLog.jsx";
 import {
-  createSession, updateSessionTitle, listSessions, listAllSessions,
+  createSession, updateSessionTitle, listAllSessions,
   addMessage, getMessages, addExtraction, getExtractions,
 } from "./db.js";
 import { fetchHealth, sendChat } from "./api.js";
@@ -78,11 +77,33 @@ function CommandMenu({ input }) {
         const isExact = cmd === input;
         return (
           <Box key={cmd}>
-            <Text color={isExact ? "#e06c00" : "#555"}>{cmd.padEnd(16)}</Text>
-            <Text color="#2a2a2a">{desc}</Text>
+            <Text color={isExact ? "#e06c00" : "#888"}>{cmd.padEnd(16)}</Text>
+            <Text color="#666">{desc}</Text>
           </Box>
         );
       })}
+    </Box>
+  );
+}
+
+// ── sprite header ─────────────────────────────────────────────────────────────
+
+function SpriteHeader({ health, lastBackend }) {
+  const backend = health?.backend ?? "-";
+  const model = health?.model ?? "-";
+  const vault = (health?.vault_last_sync ?? "").slice(0, 10) || "-";
+  const status = health?.backend_status ?? "-";
+  const isFallback = lastBackend && lastBackend !== backend;
+  const backendLabel = isFallback ? `${backend}->${lastBackend}` : backend;
+
+  return (
+    <Box paddingX={2} paddingTop={1} paddingBottom={0}>
+      <Sprite />
+      <Box flexDirection="column" paddingLeft={2} justifyContent="center">
+        <Text color="white" bold>{`Overseer v${VERSION}`}</Text>
+        <Text color={isFallback ? "#e06c00" : "#aaa"}>{`${backendLabel}/${model}  ${status === "ok" ? "ok" : status}`}</Text>
+        <Text color="#666">{`vault ${vault}`}</Text>
+      </Box>
     </Box>
   );
 }
@@ -93,7 +114,8 @@ function App() {
   const { exit } = useApp();
   const { stdout } = useStdout();
 
-  const [phase, setPhase] = useState("init"); // init | sessions | chat
+  // intro -> sessions | chat
+  const [phase, setPhase] = useState("intro");
   const [managerSessions, setManagerSessions] = useState([]);
   const [sessionId, setSessionId] = useState(null);
   const [messages, setMessages] = useState([]);
@@ -105,14 +127,15 @@ function App() {
   const [extractions, setExtractions] = useState([]);
   const [lastBackend, setLastBackend] = useState(null);
   const abortRef = useRef(null);
+  const afterIntroRef = useRef(null);
 
   const rows = stdout?.rows ?? 40;
-  // Reserve: banner(6) + meta(1) + info(~7) + input(2) + status(1) + padding
-  const maxMessages = Math.max(4, rows - 20);
+  // Reserve: header(5) + divider(1) + input(3) + status(1) + padding
+  const maxMessages = Math.max(4, rows - 12);
 
   const showCmdMenu = inputValue.startsWith("/") && !inputValue.includes(" ");
 
-  useEffect(() => {
+  function afterIntro() {
     void loadHealth();
     const existing = listAllSessions();
     if (existing.length > 0) {
@@ -121,7 +144,9 @@ function App() {
     } else {
       startNewSession();
     }
-  }, []);
+  }
+
+  afterIntroRef.current = afterIntro;
 
   async function loadHealth() {
     try {
@@ -161,7 +186,7 @@ function App() {
 
   async function handleSend(text) {
     if (sending) {
-      addMsg({ role: "error", content: "busy — /stop to cancel" });
+      addMsg({ role: "error", content: "busy - /stop to cancel" });
       return;
     }
 
@@ -174,13 +199,15 @@ function App() {
     }
 
     setSending(true);
+    setElapsed(null);
     const t0 = Date.now();
     const controller = new AbortController();
     abortRef.current = controller;
 
     try {
       const d = await sendChat(text, controller.signal);
-      setElapsed((Date.now() - t0) / 1000);
+      const took = (Date.now() - t0) / 1000;
+      setElapsed(took);
 
       const toolCalls = d.tool_calls ?? [];
       const response = d.response || d.error || "no response";
@@ -190,14 +217,13 @@ function App() {
       if (backendUsed && backendUsed !== configured) {
         addMsg({
           role: "system",
-          content: `⚠ backend switched: ${configured} → ${backendUsed}${d.fallback_reason ? ` (${d.fallback_reason})` : ""}`,
+          content: `! backend switched: ${configured} -> ${backendUsed}${d.fallback_reason ? ` (${d.fallback_reason})` : ""}`,
         });
       }
 
       addMsg({ role: "assistant", content: response, toolCalls });
       addMessage(sessionId, "assistant", response, toolCalls.length ? toolCalls : null);
 
-      // Background extraction — writes to vault, stores result for /extracted
       void (async () => {
         try {
           const r = await fetch(`${API_URL}/extract`, {
@@ -260,11 +286,12 @@ function App() {
     } else if (cmd === "/quit" || cmd === "/exit") {
       exit();
     } else {
-      addMsg({ role: "error", content: `unknown: ${text}  — /help` });
+      addMsg({ role: "error", content: `unknown: ${text}  - /help` });
     }
   }
 
   useInput((input, key) => {
+    if (phase === "intro") return;
     if (phase !== "chat") return;
 
     if (key.return) {
@@ -308,12 +335,16 @@ function App() {
     }
   });
 
-  if (phase === "init") return <Text color="#333">loading…</Text>;
+  // ── intro phase ──────────────────────────────────────────────────────────────
+  if (phase === "intro") {
+    return <IntroBanner onDone={() => afterIntroRef.current()} />;
+  }
 
+  // ── sessions picker ──────────────────────────────────────────────────────────
   if (phase === "sessions") {
     return (
       <Box flexDirection="column">
-        <Banner />
+        <SpriteHeader health={health} lastBackend={lastBackend} />
         <SessionManager
           initialSessions={managerSessions}
           activeSessionId={sessionId}
@@ -325,15 +356,19 @@ function App() {
     );
   }
 
+  // ── chat ─────────────────────────────────────────────────────────────────────
   const visibleMessages = messages.slice(-maxMessages);
 
   return (
     <Box flexDirection="column" height={rows}>
-      <Banner />
-      <MetaLine health={health} />
-      <InfoPanel health={health} />
+      <SpriteHeader health={health} lastBackend={lastBackend} />
 
-      {/* Chat — messages pushed to bottom with justifyContent */}
+      {/* divider */}
+      <Box paddingX={2} paddingTop={1}>
+        <Text color="#444">{"─".repeat(Math.max(10, (stdout?.columns ?? 80) - 4))}</Text>
+      </Box>
+
+      {/* chat area */}
       <Box flexDirection="column" flexGrow={1} paddingX={2} justifyContent="flex-end" overflow="hidden">
         {visibleMessages.map((m, i) => (
           <MessageRow key={i} msg={m} />
@@ -345,38 +380,23 @@ function App() {
         )}
       </Box>
 
-      {/* Panels above input */}
+      {/* panels */}
       {showExtracted && <ExtractionLog extractions={extractions} />}
       {showCmdMenu && <CommandMenu input={inputValue} />}
 
-      {/* Input bar — single top separator */}
-      <Box
-        borderStyle="single"
-        borderBottom={false}
-        borderLeft={false}
-        borderRight={false}
-        borderColor="#1e1e1e"
-        paddingX={2}
-        paddingTop={1}
-        height={3}
-      >
-        <Text color="#555">{"  > "}</Text>
-        <Text color="#d0d0d0">{inputValue}</Text>
+      {/* divider above input */}
+      <Box paddingX={2}>
+        <Text color="#444">{"─".repeat(Math.max(10, (stdout?.columns ?? 80) - 4))}</Text>
+      </Box>
+
+      {/* input */}
+      <Box paddingX={2} paddingTop={0} height={2}>
+        <Text color="#e06c00">{"  > "}</Text>
+        <Text color="white">{inputValue}</Text>
         <Text color="#e06c00">{"▌"}</Text>
       </Box>
 
       <StatusBar health={health} elapsed={elapsed} lastBackend={lastBackend} />
-    </Box>
-  );
-}
-
-function MetaLine({ health }) {
-  const backend = health?.backend ?? "—";
-  const model = health?.model ?? "—";
-  const date = new Date().toLocaleDateString("en-CA", { timeZone: "America/Los_Angeles" }).replace(/-/g, ".");
-  return (
-    <Box paddingX={2}>
-      <Text color="#2a2a2a">{`  Overseer ${VERSION} (${date}) · ${backend}/${model}`}</Text>
     </Box>
   );
 }
@@ -387,7 +407,7 @@ function MessageRow({ msg }) {
   if (role === "user") {
     return (
       <Box marginTop={1}>
-        <Text color="#d0d0d0" bold wrap="wrap">{`you    ${content}`}</Text>
+        <Text color="white" bold wrap="wrap">{`you    ${content}`}</Text>
       </Box>
     );
   }
@@ -396,18 +416,19 @@ function MessageRow({ msg }) {
     return (
       <Box flexDirection="column" marginBottom={1}>
         {(toolCalls || []).slice(0, 8).map((t, i) => (
-          <Text key={i} color="#2d2d2d">{`  → ${t}`}</Text>
+          <Text key={i} color="#888">{`  -> ${t}`}</Text>
         ))}
-        <Text color="#777" wrap="wrap">{`⬡      ${content}`}</Text>
+        <Text color="#aaa" wrap="wrap">{`⬡      ${content}`}</Text>
       </Box>
     );
   }
 
   if (role === "error") {
-    return <Text color="#7a2020">{content}</Text>;
+    return <Text color="#ff6b6b">{content}</Text>;
   }
 
-  return <Text color="#2d2d2d">{content}</Text>;
+  // system messages
+  return <Text color="#888">{content}</Text>;
 }
 
 render(<App />);
