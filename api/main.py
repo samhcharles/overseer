@@ -45,6 +45,10 @@ OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:14b")
 
+# Cloudflare Worker settings (edge tools: fetch, KV, webhook, cron)
+WORKER_URL = os.environ.get("WORKER_URL", "")
+WORKER_SECRET = os.environ.get("WORKER_SECRET", "")
+
 USER_TIMEZONE = os.environ.get("USER_TIMEZONE", "America/Los_Angeles")
 
 app = FastAPI(title="Overseer API", version="1.0.0")
@@ -115,12 +119,72 @@ def web_search(query: str) -> str:
         return f"[search error: {e}]"
 
 
+def _worker_headers() -> dict:
+    return {"Authorization": f"Bearer {WORKER_SECRET}", "Content-Type": "application/json"}
+
+
+def web_fetch(url: str) -> str:
+    if not WORKER_URL:
+        return "[worker not configured: WORKER_URL not set]"
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            f"{WORKER_URL}/fetch?url={url}",
+            headers=_worker_headers(),
+        )
+        with urllib.request.urlopen(req, timeout=15) as r:
+            import json as _json
+            data = _json.loads(r.read())
+        return data.get("content") or f"[empty response from {url}]"
+    except Exception as e:
+        return f"[fetch error: {e}]"
+
+
+def kv_get(key: str) -> str:
+    if not WORKER_URL:
+        return "[worker not configured]"
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            f"{WORKER_URL}/kv/get?key={key}",
+            headers=_worker_headers(),
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            import json as _json
+            data = _json.loads(r.read())
+        return data.get("value") if data.get("found") else f"[not found: {key}]"
+    except Exception as e:
+        return f"[kv_get error: {e}]"
+
+
+def kv_set(key: str, value: str, ttl: int = 86400) -> str:
+    if not WORKER_URL:
+        return "[worker not configured]"
+    try:
+        import urllib.request, json as _json
+        body = _json.dumps({"key": key, "value": value, "ttl": ttl}).encode()
+        req = urllib.request.Request(
+            f"{WORKER_URL}/kv/set",
+            data=body,
+            headers=_worker_headers(),
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = _json.loads(r.read())
+        return f"stored {key}" if data.get("stored") else f"[kv_set failed]"
+    except Exception as e:
+        return f"[kv_set error: {e}]"
+
+
 TOOLS_MAP = {
     "vault_read": vault_read,
     "vault_write": vault_write,
     "vault_search": vault_search,
     "list_notes": list_notes,
     "web_search": web_search,
+    "web_fetch": web_fetch,
+    "kv_get": kv_get,
+    "kv_set": kv_set,
 }
 
 TOOLS_SPEC = [
@@ -152,6 +216,29 @@ TOOLS_SPEC = [
         "name": "web_search",
         "description": "Search the web via DuckDuckGo. Returns top 5 results.",
         "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+    }},
+    {"type": "function", "function": {
+        "name": "web_fetch",
+        "description": "Fetch the full content of a URL via Cloudflare edge worker. Better than web_search for reading actual page content.",
+        "parameters": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
+    }},
+    {"type": "function", "function": {
+        "name": "kv_get",
+        "description": "Read a value from Overseer's edge KV store by key.",
+        "parameters": {"type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"]},
+    }},
+    {"type": "function", "function": {
+        "name": "kv_set",
+        "description": "Write a value to Overseer's edge KV store. Defaults to 24h TTL.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "key": {"type": "string"},
+                "value": {"type": "string"},
+                "ttl": {"type": "integer", "description": "TTL in seconds, default 86400"},
+            },
+            "required": ["key", "value"],
+        },
     }},
 ]
 
@@ -236,7 +323,7 @@ async def _openrouter_chat(messages: list[dict]) -> dict:
             f"{OPENROUTER_BASE}/chat/completions",
             headers={
                 "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                "HTTP-Referer": "https://github.com/samhcharles/overseer-gateway",
+                "HTTP-Referer": "https://github.com/samhcharles/overseer",
                 "X-Title": "Overseer",
                 "Content-Type": "application/json",
             },

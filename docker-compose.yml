@@ -10,6 +10,8 @@ services:
       - GROQ_MODEL=${GROQ_MODEL:-llama-3.3-70b-versatile}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
       - OPENROUTER_MODEL=${OPENROUTER_MODEL:-google/gemini-2.0-flash-exp:free}
+      - WORKER_URL=${WORKER_URL}
+      - WORKER_SECRET=${WORKER_SECRET}
       - VAULT_PATH=/vault
       - USER_TIMEZONE=${USER_TIMEZONE:-America/Los_Angeles}
     ports:
