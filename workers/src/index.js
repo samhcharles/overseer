@@ -89,6 +89,12 @@ async function handleKvSet(request, env) {
 
 // ── /webhook/:source ──────────────────────────────────────────────────────────
 
+function overseerHeaders(env) {
+  const h = { "Content-Type": "application/json" };
+  if (env.OVERSEER_API_KEY) h["Authorization"] = `Bearer ${env.OVERSEER_API_KEY}`;
+  return h;
+}
+
 async function handleWebhook(request, env, source) {
   let body;
   try {
@@ -97,10 +103,9 @@ async function handleWebhook(request, env, source) {
     body = "";
   }
 
-  const overseerUrl = env.OVERSEER_API_URL || "http://100.73.12.59:8765";
+  const overseerUrl = env.OVERSEER_API_URL || "https://overseer.wokspec.org";
   let text = body;
 
-  // Parse JSON payloads for common sources
   try {
     const parsed = JSON.parse(body);
     if (source === "github" && parsed.commits) {
@@ -114,7 +119,7 @@ async function handleWebhook(request, env, source) {
   try {
     const r = await fetch(`${overseerUrl}/extract`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: overseerHeaders(env),
       body: JSON.stringify({ text, session_id: `webhook-${source}` }),
     });
     const result = await r.json();
@@ -127,14 +132,14 @@ async function handleWebhook(request, env, source) {
 // ── cron ──────────────────────────────────────────────────────────────────────
 
 async function handleCron(env) {
-  const overseerUrl = env.OVERSEER_API_URL || "http://100.73.12.59:8765";
+  const overseerUrl = env.OVERSEER_API_URL || "https://overseer.wokspec.org";
   const now = new Date().toLocaleString("en-US", { timeZone: "America/Los_Angeles" });
   const prompt = `Daily digest — ${now}. Check my vault for anything overdue, upcoming, or worth surfacing today. Keep it under 5 bullets.`;
 
   try {
     const r = await fetch(`${overseerUrl}/chat`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: overseerHeaders(env),
       body: JSON.stringify({ message: prompt }),
     });
     const result = await r.json();

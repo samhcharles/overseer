@@ -59,12 +59,28 @@ app = FastAPI(title="Overseer API", version="1.0.0")
 
 _bearer = HTTPBearer(auto_error=False)
 
+# Simple in-process rate limiter: max N requests per window per IP
+_rate_store: dict[str, list[float]] = {}
+_RATE_LIMIT = int(os.environ.get("RATE_LIMIT", "60"))   # requests
+_RATE_WINDOW = int(os.environ.get("RATE_WINDOW", "60"))  # seconds
 
-def _auth(credentials: HTTPAuthorizationCredentials | None = Depends(_bearer)) -> None:
-    if not OVERSEER_API_KEY:
-        return  # no key configured — allow all (backward compat during rollout)
-    if not credentials or credentials.credentials != OVERSEER_API_KEY:
-        raise HTTPException(status_code=401, detail="unauthorized")
+
+def _auth(request: Request, credentials: HTTPAuthorizationCredentials | None = Depends(_bearer)) -> None:
+    # Auth check
+    if OVERSEER_API_KEY:
+        if not credentials or credentials.credentials != OVERSEER_API_KEY:
+            raise HTTPException(status_code=401, detail="unauthorized")
+
+    # Rate limit by IP (uses CF-Connecting-IP header when behind Cloudflare Tunnel)
+    ip = request.headers.get("CF-Connecting-IP") or request.headers.get("X-Forwarded-For", "").split(",")[0].strip() or "unknown"
+    now = time.monotonic()
+    window_start = now - _RATE_WINDOW
+    hits = _rate_store.get(ip, [])
+    hits = [t for t in hits if t > window_start]
+    if len(hits) >= _RATE_LIMIT:
+        raise HTTPException(status_code=429, detail=f"rate limit: {_RATE_LIMIT} req/{_RATE_WINDOW}s")
+    hits.append(now)
+    _rate_store[ip] = hits
 
 token_ledger: dict[str, int] = {}
 
