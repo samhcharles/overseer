@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.env
+
+# TUI build artifacts
+tui/dist/
+tui/node_modules/
+
+# Workers build artifacts
+workers/dist/
+workers/node_modules/
+workers/.wrangler/
+
+# Agents runtime
+agents/__pycache__/
+agents/*.pyc

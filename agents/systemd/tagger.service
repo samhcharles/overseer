@@ -1,0 +1,18 @@
+[Unit]
+Description=Brain Tagger Agent
+After=network.target
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=%h/dev/personal/brain-agents
+ExecStart=%h/.local/bin/python3 %h/dev/personal/brain-agents/tagger.py
+Restart=always
+RestartSec=10
+
+EnvironmentFile=-%h/.secrets/master.env
+Environment=VAULT_PATH=%h/vault
+Environment=TAGGER_POLL_INTERVAL=30
+
+[Install]
+WantedBy=default.target

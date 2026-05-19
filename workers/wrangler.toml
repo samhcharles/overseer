@@ -1,0 +1,14 @@
+name = "overseer-worker"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+kv_namespaces = [
+  { binding = "OVERSEER_KV", id = "PLACEHOLDER_KV_ID" }
+]
+
+[triggers]
+crons = ["0 15 * * *"]
+
+[vars]
+OVERSEER_API_URL = "http://100.73.12.59:8765"
