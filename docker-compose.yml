@@ -21,6 +21,7 @@ services:
     volumes:
       - vault_data:/vault
     networks:
+      - coolify
       - internal
 
   vault-sync:
@@ -55,4 +56,6 @@ volumes:
   vault_data:
 
 networks:
+  coolify:
+    external: true
   internal:
