@@ -180,9 +180,10 @@ def vault_write(path: str, content: str, commit_msg: str | None = None) -> str:
         subprocess.run(git + ["config", "user.name", "Overseer"], capture_output=True)
         subprocess.run(git + ["add", str(full)], check=True, capture_output=True)
         subprocess.run(git + ["commit", "-m", msg], check=True, capture_output=True)
+        subprocess.run(git + ["pull", "--rebase", "origin", "main"], check=True, capture_output=True)
         subprocess.run(git + ["push", "origin", "main"], check=True, capture_output=True)
     except subprocess.CalledProcessError as e:
-        return f"wrote {path} but git error: {e.stderr.decode()[:200]}"
+        raise RuntimeError(f"vault git error: {e.stderr.decode()[:200]}")
     return f"wrote and committed {path}"
 
 
