@@ -1,19 +1,27 @@
 """
 Overseer API — vault-connected AI gateway.
-Backends (OVERSEER_BACKEND env var):
-  gemini     → Google Gemini (default) — free 1M tokens/day, 1M context
-  groq       → Groq API — fast, 100k tokens/day free tier
-  openrouter → OpenRouter free-tier aggregator — use :free models only
-  ollama     → Ollama — self-hosted on Oracle A1
+Backends rotate automatically across all configured free providers.
+No single primary — each request goes to the next available slot.
+
+Provider pool (in default rotation order):
+  OpenRouter :free models (3 slots) → Gemini → Groq → Ollama (local)
+
+OVERSEER_BACKEND: set to a provider name to pin it (debug only).
+  Unset or "auto" → rotation across all configured providers.
 """
 import asyncio
+import functools
 import json
+import logging
 import os
 import re
 import subprocess
+import threading
 import time
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -23,26 +31,32 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
 VAULT_PATH = Path(os.environ.get("VAULT_PATH", "/home/ubuntu/vault"))
-OVERSEER_BACKEND = os.environ.get("OVERSEER_BACKEND", "gemini")
+# "auto" = rotate across all configured free providers. Set to a provider name to pin (debug).
+OVERSEER_BACKEND = os.environ.get("OVERSEER_BACKEND", "auto")
 FOUNDER_URL = os.environ.get("FOUNDER_URL", "http://100.73.12.59:4100")
 
-# Gemini settings (default — free 1M tokens/day, 1M context window)
-# Get key free at aistudio.google.com
+# Gemini — free 1M tokens/day, 1M context. Get key at aistudio.google.com
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/openai"
 
-# Groq settings (fallback — 100k tokens/day free tier)
+# Groq — 100k tokens/day free tier
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
 GROQ_BASE = "https://api.groq.com/openai/v1"
 
-# OpenRouter settings (free-tier aggregator — only use :free models to avoid billing)
+# OpenRouter — free-tier aggregator. All models must end :free (billing guard enforced below).
+# OPENROUTER_MODELS: comma-separated list of :free models to rotate through.
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
-OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "google/gemini-2.0-flash-exp:free")
+OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "google/gemini-2.0-flash-exp:free")  # legacy alias
+_OR_MODELS_RAW = os.environ.get(
+    "OPENROUTER_MODELS",
+    "google/gemini-2.0-flash-exp:free,meta-llama/llama-3.3-70b-instruct:free,deepseek/deepseek-chat-v3-0324:free",
+)
+OPENROUTER_MODELS: list[str] = [m.strip() for m in _OR_MODELS_RAW.split(",") if m.strip().endswith(":free")]
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 
-# Ollama settings (self-hosted — Oracle A1)
+# Ollama — self-hosted (Oracle A1). No rate limits.
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:14b")
 
@@ -58,6 +72,58 @@ USER_TIMEZONE = os.environ.get("USER_TIMEZONE", "America/Los_Angeles")
 app = FastAPI(title="Overseer API", version="1.0.0")
 
 _bearer = HTTPBearer(auto_error=False)
+
+
+# ─── provider rotation ────────────────────────────────────────────────────────
+
+class RateLimitError(Exception):
+    pass
+
+
+@dataclass
+class _Slot:
+    name: str
+    call: Callable
+    reset_ttl: int = 3600
+    blocked_until: float = field(default=0.0, init=False)
+
+
+class ProviderRotator:
+    def __init__(self, slots: list[_Slot]):
+        self._slots = slots
+        self._lock = threading.Lock()
+        self._idx = 0
+
+    def next(self) -> "_Slot | None":
+        now = time.monotonic()
+        with self._lock:
+            for _ in range(len(self._slots)):
+                slot = self._slots[self._idx % len(self._slots)]
+                self._idx += 1
+                if slot.blocked_until <= now:
+                    return slot
+        return None
+
+    def block(self, slot: _Slot) -> None:
+        slot.blocked_until = time.monotonic() + slot.reset_ttl
+        logging.warning("overseer: blocked slot %s for %ds", slot.name, slot.reset_ttl)
+
+    def soonest_reset(self) -> float:
+        return min((s.blocked_until for s in self._slots), default=0.0)
+
+    def status(self) -> tuple[list[str], dict[str, str]]:
+        now = time.monotonic()
+        active = [s.name for s in self._slots if s.blocked_until <= now]
+        blocked = {
+            s.name: f"resets in {max(0, int(s.blocked_until - now)) // 60}m"
+            for s in self._slots if s.blocked_until > now
+        }
+        return active, blocked
+
+
+# _rotator is initialized after the _*_chat functions are defined (see below).
+_rotator: ProviderRotator | None = None
+
 
 # Simple in-process rate limiter: max N requests per window per IP
 _rate_store: dict[str, list[float]] = {}
@@ -288,33 +354,7 @@ async def _gemini_chat(messages: list[dict]) -> dict:
         )
         if not r.is_success:
             if r.status_code in (429, 503):
-                import logging
-                fallback_reason = f"gemini {r.status_code}"
-                logging.warning(f"Gemini {r.status_code} — trying fallbacks")
-                if GROQ_API_KEY:
-                    try:
-                        result = await _groq_chat(messages)
-                        result["_backend_used"] = "groq"
-                        result["_fallback_reason"] = fallback_reason
-                        return result
-                    except Exception as groq_err:
-                        fallback_reason += f", groq failed"
-                        logging.warning(f"Groq also failed: {groq_err}")
-                if OPENROUTER_API_KEY and OPENROUTER_MODEL.endswith(":free"):
-                    try:
-                        result = await _openrouter_chat(messages)
-                        result["_backend_used"] = "openrouter"
-                        result["_fallback_reason"] = fallback_reason
-                        return result
-                    except Exception as or_err:
-                        fallback_reason += f", openrouter failed"
-                        logging.warning(f"OpenRouter also failed: {or_err}")
-                return {
-                    "content": "All backends are rate-limited right now. Gemini resets in ~1h, Groq in ~8h. Try again later.",
-                    "tool_calls": [],
-                    "_backend_used": "none",
-                    "_fallback_reason": fallback_reason,
-                }
+                raise RateLimitError(f"gemini {r.status_code}")
             raise RuntimeError(f"Gemini {r.status_code}: {r.text[:500]}")
         data = r.json()
         token_ledger[GEMINI_MODEL] = token_ledger.get(GEMINI_MODEL, 0) + data.get("usage", {}).get("total_tokens", 0)
@@ -338,6 +378,8 @@ async def _groq_chat(messages: list[dict]) -> dict:
             json=payload,
         )
         if not r.is_success:
+            if r.status_code == 429:
+                raise RateLimitError("groq 429")
             err = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
             code = (err.get("error") or {}).get("code", "")
             # Tool use format mismatch — retry without tools so user gets a response
@@ -358,11 +400,11 @@ async def _groq_chat(messages: list[dict]) -> dict:
         return {"content": choice.get("content") or "", "tool_calls": choice.get("tool_calls") or [], "_backend_used": "groq"}
 
 
-async def _openrouter_chat(messages: list[dict]) -> dict:
-    if not OPENROUTER_MODEL.endswith(":free"):
-        raise RuntimeError(f"OpenRouter model {OPENROUTER_MODEL!r} is not a :free model — refusing to risk billing")
+async def _openrouter_chat(messages: list[dict], model: str = OPENROUTER_MODEL) -> dict:
+    if not model.endswith(":free"):
+        raise RuntimeError(f"OpenRouter model {model!r} is not a :free model — refusing to risk billing")
     payload = {
-        "model": OPENROUTER_MODEL,
+        "model": model,
         "messages": messages,
         "tools": TOOLS_SPEC,
     }
@@ -378,11 +420,14 @@ async def _openrouter_chat(messages: list[dict]) -> dict:
             json=payload,
         )
         if not r.is_success:
+            if r.status_code == 429:
+                raise RateLimitError(f"openrouter/{model} 429")
             raise RuntimeError(f"OpenRouter {r.status_code}: {r.text[:500]}")
         data = r.json()
-        token_ledger[OPENROUTER_MODEL] = token_ledger.get(OPENROUTER_MODEL, 0) + data.get("usage", {}).get("total_tokens", 0)
+        token_ledger[model] = token_ledger.get(model, 0) + data.get("usage", {}).get("total_tokens", 0)
         choice = data["choices"][0]["message"]
-        return {"content": choice.get("content") or "", "tool_calls": choice.get("tool_calls") or [], "_backend_used": "openrouter"}
+        slot_name = f"or:{model.split('/')[-1].replace(':free', '')}"
+        return {"content": choice.get("content") or "", "tool_calls": choice.get("tool_calls") or [], "_backend_used": slot_name}
 
 
 async def _ollama_chat(messages: list[dict]) -> dict:
@@ -395,25 +440,75 @@ async def _ollama_chat(messages: list[dict]) -> dict:
         return {"content": msg.get("content") or "", "tool_calls": msg.get("tool_calls") or [], "_backend_used": "ollama"}
 
 
+def _build_rotator() -> ProviderRotator:
+    slots: list[_Slot] = []
+    # OpenRouter gets first slots (most free-model variety, 3600s TTL per model)
+    if OPENROUTER_API_KEY and OPENROUTER_MODELS:
+        for or_model in OPENROUTER_MODELS:
+            short = or_model.split("/")[-1].replace(":free", "")
+            slots.append(_Slot(
+                name=f"or:{short}",
+                call=functools.partial(_openrouter_chat, model=or_model),
+                reset_ttl=3600,
+            ))
+    # Gemini (1M tokens/day, ~1h reset window)
+    if GEMINI_API_KEY:
+        slots.append(_Slot(name="gemini", call=_gemini_chat, reset_ttl=3600))
+    # Groq (100k tokens/day, ~8h reset window)
+    if GROQ_API_KEY:
+        slots.append(_Slot(name="groq", call=_groq_chat, reset_ttl=28800))
+    # Ollama (local, retry fast — 60s in case of transient error)
+    if OLLAMA_URL:
+        slots.append(_Slot(name="ollama", call=_ollama_chat, reset_ttl=60))
+    return ProviderRotator(slots)
+
+
+_rotator = _build_rotator()
+
+
 async def llm_chat(messages: list[dict]) -> dict:
-    if OVERSEER_BACKEND == "ollama":
-        return await _ollama_chat(messages)
-    if OVERSEER_BACKEND == "groq":
-        return await _groq_chat(messages)
-    if OVERSEER_BACKEND == "openrouter":
-        return await _openrouter_chat(messages)
-    return await _gemini_chat(messages)
+    # Debug pin: if OVERSEER_BACKEND is set to a specific provider, skip rotation.
+    if OVERSEER_BACKEND not in ("auto", ""):
+        if OVERSEER_BACKEND == "ollama":
+            return await _ollama_chat(messages)
+        if OVERSEER_BACKEND == "groq":
+            return await _groq_chat(messages)
+        if OVERSEER_BACKEND == "openrouter":
+            return await _openrouter_chat(messages)
+        if OVERSEER_BACKEND == "gemini":
+            return await _gemini_chat(messages)
+
+    # Rotation: try each slot in round-robin order, skip blocked ones.
+    n = len(_rotator._slots)
+    for _ in range(n + 1):
+        slot = _rotator.next()
+        if slot is None:
+            secs = max(0, int(_rotator.soonest_reset() - time.monotonic()))
+            return {
+                "content": f"All providers are rate-limited. Soonest reset in ~{secs // 60}m. Try again then.",
+                "tool_calls": [],
+                "_backend_used": "none",
+            }
+        try:
+            result = await slot.call(messages)
+            result.setdefault("_backend_used", slot.name)
+            return result
+        except RateLimitError:
+            _rotator.block(slot)
+        except Exception as exc:
+            logging.warning("overseer: slot %s error (skipping): %s", slot.name, exc)
+    return {"content": "No providers available.", "tool_calls": [], "_backend_used": "none"}
 
 
 async def run_tool_loop(messages: list[dict]) -> tuple[str, list[str], str, str | None]:
     tool_log: list[str] = []
-    backend_used = OVERSEER_BACKEND
+    backend_used = "rotator"
     fallback_reason: str | None = None
     for _ in range(10):
         response = await llm_chat(messages)
         content = response["content"]
         tool_calls = response["tool_calls"]
-        backend_used = response.get("_backend_used", OVERSEER_BACKEND)
+        backend_used = response.get("_backend_used", "rotator")
         fallback_reason = response.get("_fallback_reason")
 
         if not tool_calls:
@@ -448,14 +543,11 @@ async def run_tool_loop(messages: list[dict]) -> tuple[str, list[str], str, str 
 
 def update_log(status: str, tool_calls: list[str] | None = None) -> None:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    if OVERSEER_BACKEND == "gemini":
-        backend_label = f"Gemini/{GEMINI_MODEL}"
-    elif OVERSEER_BACKEND == "groq":
-        backend_label = f"Groq/{GROQ_MODEL}"
-    elif OVERSEER_BACKEND == "openrouter":
-        backend_label = f"OpenRouter/{OPENROUTER_MODEL}"
+    if _rotator:
+        active, blocked = _rotator.status()
+        backend_label = f"rotator ({len(active)} active, {len(blocked)} blocked)"
     else:
-        backend_label = f"Ollama/{OLLAMA_MODEL}"
+        backend_label = OVERSEER_BACKEND
     tool_lines = "\n".join(f"- `{t}`" for t in (tool_calls or [])[-10:]) or "*no calls*"
     content = f"---\ntags: [overseer, log]\n---\n\n# Overseer Log\n\n- **{now}** — {backend_label}\n- {status}\n\n## Last calls\n\n{tool_lines}\n"
     log_path = VAULT_PATH / "memory" / "overseer-live.md"
@@ -747,23 +839,24 @@ async def status(_: None = Depends(_auth)):
 
 @app.get("/health")
 async def health():
+    # Check at least one provider is reachable
     backend_status = "unknown"
     try:
-        if OVERSEER_BACKEND == "gemini":
+        if GEMINI_API_KEY:
             async with httpx.AsyncClient(timeout=5) as c:
                 r = await c.get(
                     "https://generativelanguage.googleapis.com/v1beta/models",
                     params={"key": GEMINI_API_KEY},
                 )
-                backend_status = "ok" if r.status_code == 200 else f"http {r.status_code}"
-        elif OVERSEER_BACKEND == "groq":
+                backend_status = "ok" if r.status_code == 200 else f"gemini http {r.status_code}"
+        elif GROQ_API_KEY:
             async with httpx.AsyncClient(timeout=5) as c:
                 r = await c.get(f"{GROQ_BASE}/models", headers={"Authorization": f"Bearer {GROQ_API_KEY}"})
-                backend_status = "ok" if r.status_code == 200 else f"http {r.status_code}"
-        elif OVERSEER_BACKEND == "openrouter":
+                backend_status = "ok" if r.status_code == 200 else f"groq http {r.status_code}"
+        elif OPENROUTER_API_KEY:
             async with httpx.AsyncClient(timeout=5) as c:
                 r = await c.get(f"{OPENROUTER_BASE}/models", headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"})
-                backend_status = "ok" if r.status_code == 200 else f"http {r.status_code}"
+                backend_status = "ok" if r.status_code == 200 else f"openrouter http {r.status_code}"
         else:
             async with httpx.AsyncClient(timeout=5) as c:
                 r = await c.get(f"{OLLAMA_URL}/api/tags")
@@ -778,9 +871,15 @@ async def health():
     except Exception:
         pass
 
+    active_slots: list[str] = []
+    blocked_slots: dict[str, str] = {}
+    if _rotator:
+        active_slots, blocked_slots = _rotator.status()
+
     return {
-        "backend": OVERSEER_BACKEND,
-        "model": {"gemini": GEMINI_MODEL, "groq": GROQ_MODEL, "openrouter": OPENROUTER_MODEL}.get(OVERSEER_BACKEND, OLLAMA_MODEL),
+        "backend": "rotator" if OVERSEER_BACKEND in ("auto", "") else OVERSEER_BACKEND,
+        "active_slots": active_slots,
+        "blocked_slots": blocked_slots,
         "backend_status": backend_status,
         "vault_path": str(VAULT_PATH),
         "vault_last_sync": vault_sync,
@@ -814,14 +913,14 @@ async def chat(req: ChatRequest, _: None = Depends(_auth)):
         return {
             "response": answer,
             "tool_calls": tool_log,
-            "backend": OVERSEER_BACKEND,
+            "backend": "rotator",
             "backend_used": backend_used,
             "fallback_reason": fallback_reason,
             "extracted": None,
         }
     except Exception as e:
         import traceback
-        return {"response": None, "error": str(e), "trace": traceback.format_exc()[-1000:], "backend": OVERSEER_BACKEND, "backend_used": OVERSEER_BACKEND, "fallback_reason": None}
+        return {"response": None, "error": str(e), "trace": traceback.format_exc()[-1000:], "backend": "rotator", "backend_used": "none", "fallback_reason": None}
 
 
 @app.post("/extract")

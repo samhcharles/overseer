@@ -3,13 +3,14 @@ services:
     build: ./api
     restart: unless-stopped
     environment:
-      - OVERSEER_BACKEND=${OVERSEER_BACKEND:-gemini}
+      - OVERSEER_BACKEND=${OVERSEER_BACKEND:-auto}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.0-flash}
       - GROQ_API_KEY=${GROQ_API_KEY}
       - GROQ_MODEL=${GROQ_MODEL:-llama-3.3-70b-versatile}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
       - OPENROUTER_MODEL=${OPENROUTER_MODEL:-google/gemini-2.0-flash-exp:free}
+      - OPENROUTER_MODELS=${OPENROUTER_MODELS:-google/gemini-2.0-flash-exp:free,meta-llama/llama-3.3-70b-instruct:free,deepseek/deepseek-chat-v3-0324:free}
       - WORKER_URL=${WORKER_URL}
       - WORKER_SECRET=${WORKER_SECRET}
       - OVERSEER_API_KEY=${OVERSEER_API_KEY}
@@ -36,7 +37,7 @@ services:
         git config --global --add safe.directory /vault &&
         git config --global user.email 'overseer@brain' &&
         git config --global user.name 'Overseer' &&
-        REMOTE=https://$$GIT_USER:$$GIT_TOKEN@github.com/samhcharles/brain.git &&
+        REMOTE=https://$$GIT_USER:$$GIT_TOKEN@github.com/samhcharles/vault.git &&
         if [ ! -d /vault/.git ] || ! git -C /vault rev-parse HEAD >/dev/null 2>&1; then
           rm -rf /vault/.git /vault/* 2>/dev/null || true;
           git clone $$REMOTE /vault;
