@@ -65,11 +65,11 @@ fail2ban-client status 2>/dev/null | grep "Jail list" || true
 echo ""
 echo "── Overseer API auth ────────────────────────────"
 CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 5 -X POST http://localhost:8765/chat \
-  -H "Content-Type: application/json" -d '{"message":"ping"}' 2>/dev/null || echo "000")
-echo "  /chat no-auth → HTTP $CODE  (want 401)"
+  -H "Content-Type: application/json" -d '{"message":"ping"}' 2>/dev/null)
+echo "  /chat no-auth → HTTP ${CODE:-conn-failed}  (want 401)"
 
-HEALTH=$(curl -s -o /dev/null -w "%{http_code}" -m 5 http://localhost:8765/health 2>/dev/null || echo "000")
-echo "  /health no-auth → HTTP $HEALTH  (want 200)"
+HEALTH=$(curl -s -o /dev/null -w "%{http_code}" -m 5 http://localhost:8765/health 2>/dev/null)
+echo "  /health no-auth → HTTP ${HEALTH:-conn-failed}  (want 200)"
 
 echo ""
 echo "── Secrets in .env (names only) ─────────────────"
