@@ -1,17 +1,16 @@
 [Unit]
-Description=Brain Tagger Agent
+Description=Brain Yap Processor Agent
 After=network.target
 
 [Service]
 Type=simple
 WorkingDirectory=%h/dev/personal/overseer/agents
-ExecStart=/usr/bin/python3 %h/dev/personal/overseer/agents/tagger.py
+ExecStart=/usr/bin/python3 %h/dev/personal/overseer/agents/yap_processor.py
 Restart=on-failure
 RestartSec=15
 
 EnvironmentFile=-%h/.secrets/master.env
 Environment=VAULT_PATH=%h/vault
-Environment=TAGGER_POLL_INTERVAL=30
 
 [Install]
 WantedBy=default.target

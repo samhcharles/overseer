@@ -16,6 +16,7 @@ import httpx
 
 VAULT_PATH = Path(os.environ.get("VAULT_PATH", Path.home() / "vault"))
 OVERSEER_API_URL = os.environ.get("OVERSEER_API_URL", "")
+OVERSEER_API_KEY = os.environ.get("OVERSEER_API_KEY", "")
 POLL_INTERVAL = int(os.environ.get("TAGGER_POLL_INTERVAL", "30"))
 SEEN_FILE = Path.home() / ".local" / "state" / "brain-agents" / "tagger-seen.json"
 
@@ -44,9 +45,11 @@ def triage(content: str, source: str) -> dict | None:
     if not OVERSEER_API_URL:
         return None
     try:
+        headers = {"Authorization": f"Bearer {OVERSEER_API_KEY}"} if OVERSEER_API_KEY else {}
         r = httpx.post(
             f"{OVERSEER_API_URL}/triage",
             json={"content": content[:3000], "source": source},
+            headers=headers,
             timeout=30,
         )
         r.raise_for_status()
