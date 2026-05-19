@@ -27,4 +27,12 @@ ssh -o StrictHostKeyChecking=no "${VPS}" "
 
 echo "→ waiting for /health..."
 sleep 5
-curl -sf "http://100.73.12.59:8765/health" | python3 -c "import json,sys; d=json.load(sys.stdin); print(f'ok  backend={d[\"backend\"]}  model={d[\"model\"]}')"
+curl -sf "${OVERSEER_API_URL:-https://overseer.wokspec.org}/health" \
+  -H "Authorization: Bearer ${OVERSEER_API_KEY:-}" | \
+  python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+active=d.get('active_slots',[])
+blocked=d.get('blocked_slots',{})
+print(f'ok  backend={d[\"backend\"]}  slots={len(active)}/{len(active)+len(blocked)}  status={d[\"backend_status\"]}')
+"
