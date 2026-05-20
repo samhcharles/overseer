@@ -17,7 +17,7 @@ services:
       - VAULT_PATH=/vault
       - USER_TIMEZONE=${USER_TIMEZONE:-America/Los_Angeles}
     ports:
-      - "${OVERSEER_BIND_HOST:-100.73.12.59}:8765:8765"
+      - "${OVERSEER_BIND_HOST:-127.0.0.1}:8765:8765"
     volumes:
       - vault_data:/vault
     networks:
