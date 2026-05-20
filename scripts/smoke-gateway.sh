@@ -11,6 +11,9 @@ fi
 
 BASE_URL=${BASE_URL%/}
 
+echo "→ checking ${BASE_URL}/ready"
+curl -fsS --max-time 20 "${BASE_URL}/ready" >/dev/null
+
 echo "→ checking ${BASE_URL}/health"
 HEALTH_JSON=$(curl -fsS --max-time 20 "${BASE_URL}/health")
 python3 - <<'PY' "$HEALTH_JSON"

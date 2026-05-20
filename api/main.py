@@ -1261,6 +1261,15 @@ async def health():
     }
 
 
+@app.get("/ready")
+async def ready():
+    return {
+        "status": "ok",
+        "vault_path": str(VAULT_PATH),
+        "node_registry_enabled": bool(OVERSEER_NODE_SECRET),
+    }
+
+
 def flush_token_ledger() -> None:
     usage_path = VAULT_PATH / "memory" / "usage.md"
     try:
