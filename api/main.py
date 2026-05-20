@@ -617,6 +617,7 @@ ROUTING — when raw data arrives, route it:
 - Movie mentioned (titled): wiki/personal/movies.md (title, year, context) — append row
 - Article or website mentioned: wiki/personal/articles.md — append row
 - New knowledge domain (not in vault after vault_search): wiki/knowledge/{slug}.md (create stub, tag [EMERGING])
+- Anything notable and recurring that doesn't fit above (habit, language practice, workout, game, tool, goal milestone, health metric): wiki/personal/tracking/{category-slug}.md — create page if missing, append row
 
 SKILLS — before performing a complex task, read the relevant skill file first:
 {skills_index or "(no skills loaded)"}
@@ -662,7 +663,8 @@ Return ONLY valid JSON, no other text:
   "books": [{{"title": "string", "author": "string or null", "context": "string"}}],
   "movies": [{{"title": "string", "year": "string or null", "context": "string"}}],
   "articles": [{{"title": "string", "source": "string or null", "url": "string or null"}}],
-  "knowledge_domains": [{{"domain": "string", "context": "string"}}]
+  "knowledge_domains": [{{"domain": "string", "context": "string"}}],
+  "custom_tracks": [{{"category": "string", "label": "string", "context": "string"}}]
 }}
 
 Rules:
@@ -672,6 +674,11 @@ Rules:
 - If nothing to extract for a category, use empty array.
 - Extract books, movies, articles only when explicitly named — not general references.
 - knowledge_domains: only when a distinct field of study or practice is clearly being engaged with.
+- custom_tracks: use this for anything notable and recurring that doesn't fit above categories.
+  Examples: a language being practiced, a workout routine, a game being played, a tool being learned,
+  a habit, a goal milestone, a financial decision, a health metric. Be specific — category is the
+  type of thing (e.g. "language_practice", "habit", "tool"), label is the specific item.
+  Only include if it is clearly significant to Sam's life or work. Empty array if nothing qualifies.
 
 Text: {text}"""
 
@@ -879,6 +886,34 @@ Text: {text}"""
                 )
                 vault_write(kd_path, content, f"overseer: emerging domain — {domain}")
                 vault_writes.append(kd_path)
+
+    # Custom tracks → wiki/personal/tracking/{category}.md
+    for ct in entities.get("custom_tracks", []):
+        category = (ct.get("category") or "").strip().lower().replace(" ", "_")
+        label = (ct.get("label") or "").strip()
+        if not category or not label:
+            continue
+        slug = category.replace("_", "-")
+        ct_path = f"wiki/personal/tracking/{slug}.md"
+        existing = vault_read(ct_path)
+        context = ct.get("context") or ""
+        entry = f"| {label} | {today} | {context} |"
+        if "[not found:" not in existing:
+            if label not in existing:
+                updated = existing.rstrip() + f"\n{entry}\n"
+                vault_write(ct_path, updated, f"overseer: track {category} — {label}")
+                vault_writes.append(ct_path)
+        else:
+            title = category.replace("_", " ").title()
+            content = (
+                f"---\ntitle: {title}\npartition: personal\ncategory: {category}\n"
+                f"sources: [overseer]\ncreated: {today}\nupdated: {today}\n"
+                f"tags: [personal, tracking, {slug}]\n---\n\n"
+                f"# {title}\n\nAgent-owned. Overseer created this page from raw session data.\n\n"
+                f"| Item | First seen | Context |\n|---|---|---|\n{entry}\n"
+            )
+            vault_write(ct_path, content, f"overseer: new track page — {category}")
+            vault_writes.append(ct_path)
 
     return {"entities": entities, "vault_writes": vault_writes}
 
