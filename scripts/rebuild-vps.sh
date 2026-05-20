@@ -7,9 +7,14 @@ set -e
 COMMIT=${1:-$(git -C "$(dirname "$0")/.." rev-parse --short HEAD)}
 APP_DIR=/data/coolify/applications/lhqks3whe00kfb9tvrb6ocgh
 IMAGE="lhqks3whe00kfb9tvrb6ocgh_overseer:${COMMIT}"
-VPS=root@100.73.12.59
 
 source ~/.secrets/master.env 2>/dev/null || true
+VPS=${OVERSEER_SSH_HOST:-}
+
+if [[ -z "$VPS" ]]; then
+  echo "error: set OVERSEER_SSH_HOST to the deployment target, e.g. root@your-tailscale-host" >&2
+  exit 1
+fi
 
 echo "→ building ${IMAGE} on VPS at ${VPS}"
 ssh -o StrictHostKeyChecking=no "${VPS}" "
@@ -33,14 +38,10 @@ print('image set to ${IMAGE}')
   docker ps --filter name=overseer-lhqks --format 'Image: {{.Image}}  Status: {{.Status}}'
 "
 
-echo "→ waiting for /health..."
+echo "→ waiting for gateway smoke..."
 sleep 5
-curl -sf "${OVERSEER_API_URL:-http://100.73.12.59:8765}/health" \
-  -H "Authorization: Bearer ${OVERSEER_API_KEY:-}" | \
-  python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-active=d.get('active_slots',[])
-blocked=d.get('blocked_slots',{})
-print(f'ok  backend={d[\"backend\"]}  slots={len(active)}/{len(active)+len(blocked)}  status={d[\"backend_status\"]}')
-"
+if [[ -z "${OVERSEER_API_URL:-}" ]]; then
+  echo "error: set OVERSEER_API_URL to the deployed gateway URL before running rebuild-vps.sh" >&2
+  exit 1
+fi
+"$(dirname "$0")/smoke-gateway.sh" "${OVERSEER_API_URL}"

@@ -16,8 +16,6 @@ services:
       - OVERSEER_API_KEY=${OVERSEER_API_KEY}
       - VAULT_PATH=/vault
       - USER_TIMEZONE=${USER_TIMEZONE:-America/Los_Angeles}
-    ports:
-      - "8765:8765"
     volumes:
       - vault_data:/vault
     networks:
@@ -35,18 +33,44 @@ services:
       - vault_data:/vault
     command: >
       -c "
+        set -eu &&
         git config --global --add safe.directory /vault &&
         git config --global user.email 'overseer@brain' &&
         git config --global user.name 'Overseer' &&
         REMOTE=https://$$GIT_USER:$$GIT_TOKEN@github.com/samhcharles/vault.git &&
-        if [ ! -d /vault/.git ] || ! git -C /vault rev-parse HEAD >/dev/null 2>&1; then
-          rm -rf /vault/.git /vault/* 2>/dev/null || true;
-          git clone $$REMOTE /vault;
-        fi &&
-        git -C /vault remote set-url origin $$REMOTE &&
+        sync_once() {
+          if [ ! -d /vault/.git ] || ! git -C /vault rev-parse HEAD >/dev/null 2>&1; then
+            find /vault -mindepth 1 -maxdepth 1 -exec rm -rf {} + &&
+            git clone $$REMOTE /vault || return 1;
+          fi;
+          git -C /vault remote set-url origin $$REMOTE || return 1;
+          git -C /vault fetch origin main || return 1;
+          set -- $$(git -C /vault rev-list --left-right --count HEAD...origin/main 2>/dev/null || echo '0 0');
+          AHEAD=$$1;
+          BEHIND=$$2;
+          if [ $$AHEAD -gt 0 ]; then
+            echo 'vault-sync: local commits present, skipping sync';
+            return 0;
+          fi;
+          if ! git -C /vault diff --quiet || ! git -C /vault diff --cached --quiet; then
+            echo 'vault-sync: local worktree dirty, skipping sync';
+            return 0;
+          fi;
+          if [ $$BEHIND -gt 0 ]; then
+            git -C /vault merge --ff-only origin/main || return 1;
+            echo 'vault-sync: fast-forwarded';
+            return 0;
+          fi;
+          echo 'vault-sync: up to date';
+          return 0;
+        } &&
         while true; do
-          git -C /vault pull --rebase origin main 2>&1 | tail -1;
-          sleep 300;
+          if sync_once; then
+            sleep 300;
+          else
+            echo 'vault-sync: sync failed, retrying in 30s';
+            sleep 30;
+          fi;
         done
       "
     networks:

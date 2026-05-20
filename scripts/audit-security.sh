@@ -3,8 +3,13 @@
 # Usage: ./audit-security.sh [vps-host]
 set -euo pipefail
 
-VPS=${1:-root@100.73.12.59}
+VPS=${1:-${OVERSEER_SSH_HOST:-}}
 PASS=0; FAIL=0; WARN=0
+
+if [[ -z "$VPS" ]]; then
+  echo "Usage: ./audit-security.sh [vps-host] or set OVERSEER_SSH_HOST" >&2
+  exit 1
+fi
 
 ok()   { echo "  [PASS] $*"; ((PASS++)); }
 fail() { echo "  [FAIL] $*"; ((FAIL++)); }
@@ -64,11 +69,39 @@ fail2ban-client status 2>/dev/null | grep "Jail list" || true
 
 echo ""
 echo "── Overseer API auth ────────────────────────────"
-CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 5 -X POST http://localhost:8765/chat \
-  -H "Content-Type: application/json" -d '{"message":"ping"}' 2>/dev/null)
+OVERSEER_CONTAINER=$(docker ps --filter 'name=overseer-lhqks' --format '{{.Names}}' | head -1)
+if [ -n "$OVERSEER_CONTAINER" ]; then
+  CODE=$(docker exec "$OVERSEER_CONTAINER" python - <<'PY'
+import urllib.request
+req = urllib.request.Request(
+    'http://127.0.0.1:8765/chat',
+    data=b'{"message":"ping"}',
+    headers={'Content-Type': 'application/json'},
+    method='POST',
+)
+try:
+    urllib.request.urlopen(req, timeout=5)
+    print('200')
+except Exception as exc:
+    status = getattr(exc, 'code', None)
+    print(status or 'conn-failed')
+PY
+)
+  HEALTH=$(docker exec "$OVERSEER_CONTAINER" python - <<'PY'
+import urllib.request
+try:
+    with urllib.request.urlopen('http://127.0.0.1:8765/health', timeout=5) as response:
+        print(response.getcode())
+except Exception as exc:
+    status = getattr(exc, 'code', None)
+    print(status or 'conn-failed')
+PY
+)
+else
+  CODE="container-missing"
+  HEALTH="container-missing"
+fi
 echo "  /chat no-auth → HTTP ${CODE:-conn-failed}  (want 401)"
-
-HEALTH=$(curl -s -o /dev/null -w "%{http_code}" -m 5 http://localhost:8765/health 2>/dev/null)
 echo "  /health no-auth → HTTP ${HEALTH:-conn-failed}  (want 200)"
 
 echo ""

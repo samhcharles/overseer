@@ -11,6 +11,7 @@ OVERSEER_BACKEND: set to a provider name to pin it (debug only).
 """
 import asyncio
 import functools
+import ipaddress
 import json
 import logging
 import os
@@ -22,18 +23,19 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 VAULT_PATH = Path(os.environ.get("VAULT_PATH", "/home/ubuntu/vault"))
 # "auto" = rotate across all configured free providers. Set to a provider name to pin (debug).
 OVERSEER_BACKEND = os.environ.get("OVERSEER_BACKEND", "auto")
-FOUNDER_URL = os.environ.get("FOUNDER_URL", "http://100.73.12.59:4100")
+FOUNDER_URL = os.environ.get("FOUNDER_URL", "").rstrip("/")
 
 # Gemini — free 1M tokens/day, 1M context. Get key at aistudio.google.com
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
@@ -68,6 +70,12 @@ WORKER_SECRET = os.environ.get("WORKER_SECRET", "")
 OVERSEER_API_KEY = os.environ.get("OVERSEER_API_KEY", "")
 
 USER_TIMEZONE = os.environ.get("USER_TIMEZONE", "America/Los_Angeles")
+OVERSEER_NODE_SECRET = os.environ.get("OVERSEER_NODE_SECRET", "")
+OVERSEER_ALLOWED_NODE_IDS = {v.strip() for v in os.environ.get("OVERSEER_ALLOWED_NODE_IDS", "").split(",") if v.strip()}
+OVERSEER_OWNER_ID = os.environ.get("OVERSEER_OWNER_ID", "").strip()
+OVERSEER_NODE_TTL = int(os.environ.get("OVERSEER_NODE_TTL", "90"))
+OVERSEER_REQUIRE_TAILNET = os.environ.get("OVERSEER_REQUIRE_TAILNET", "true").lower() not in {"0", "false", "no"}
+OVERSEER_PREFER_LOCAL_NODES = os.environ.get("OVERSEER_PREFER_LOCAL_NODES", "true").lower() not in {"0", "false", "no"}
 
 app = FastAPI(title="Overseer API", version="1.0.0")
 
@@ -86,6 +94,45 @@ class _Slot:
     call: Callable
     reset_ttl: int = 3600
     blocked_until: float = field(default=0.0, init=False)
+
+
+@dataclass
+class NodeRecord:
+    node_id: str
+    hostname: str
+    tailscale_ip: str
+    inference_url: str
+    scope: str
+    owner: str | None
+    models: list[str]
+    capabilities: list[str]
+    version: str | None
+    last_seen_monotonic: float = field(default_factory=time.monotonic)
+    last_seen_utc: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+    def touch(self, *, models: list[str] | None = None, capabilities: list[str] | None = None) -> None:
+        if models is not None:
+            self.models = models
+        if capabilities is not None:
+            self.capabilities = capabilities
+        self.last_seen_monotonic = time.monotonic()
+        self.last_seen_utc = datetime.now(timezone.utc).isoformat()
+
+    def public_dict(self) -> dict:
+        age_seconds = max(0, int(time.monotonic() - self.last_seen_monotonic))
+        return {
+            "node_id": self.node_id,
+            "hostname": self.hostname,
+            "tailscale_ip": self.tailscale_ip,
+            "inference_url": self.inference_url,
+            "scope": self.scope,
+            "owner": self.owner,
+            "models": self.models,
+            "capabilities": self.capabilities,
+            "version": self.version,
+            "last_seen_utc": self.last_seen_utc,
+            "age_seconds": age_seconds,
+        }
 
 
 class ProviderRotator:
@@ -148,10 +195,74 @@ def _auth(request: Request, credentials: HTTPAuthorizationCredentials | None = D
     hits.append(now)
     _rate_store[ip] = hits
 
+
+def _request_ip(request: Request) -> str:
+    forwarded = request.headers.get("CF-Connecting-IP") or request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+    if forwarded:
+        return forwarded
+    if request.client:
+        return request.client.host
+    return "unknown"
+
+
+def _is_private_or_tailscale(ip_text: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(ip_text)
+    except ValueError:
+        return False
+    if ip.is_loopback or ip.is_private:
+        return True
+    if ip.version == 4 and ip in ipaddress.ip_network("100.64.0.0/10"):
+        return True
+    if ip.version == 6 and ip in ipaddress.ip_network("fc00::/7"):
+        return True
+    return False
+
+
+def _prune_nodes() -> None:
+    now = time.monotonic()
+    with _node_lock:
+        stale = [node_id for node_id, record in _node_registry.items() if now - record.last_seen_monotonic > OVERSEER_NODE_TTL]
+        for node_id in stale:
+            _node_registry.pop(node_id, None)
+
+
+def _trusted_nodes() -> list[NodeRecord]:
+    _prune_nodes()
+    with _node_lock:
+        return sorted(_node_registry.values(), key=lambda record: record.last_seen_monotonic, reverse=True)
+
+
+def _validate_node_network(tailscale_ip: str, inference_url: str) -> None:
+    if not _is_private_or_tailscale(tailscale_ip):
+        raise HTTPException(status_code=403, detail=f"tailscale_ip must be private or tailscale, got {tailscale_ip}")
+    host = urlparse(inference_url).hostname or ""
+    if not host or not _is_private_or_tailscale(host):
+        raise HTTPException(status_code=403, detail=f"inference_url must target a private or tailscale host, got {inference_url}")
+
+
+def _node_access(request: Request, node_id: str, secret: str, owner: str | None = None) -> str:
+    if not OVERSEER_NODE_SECRET:
+        raise HTTPException(status_code=503, detail="node registry disabled")
+    if secret != OVERSEER_NODE_SECRET:
+        raise HTTPException(status_code=401, detail="unauthorized node")
+    client_ip = _request_ip(request)
+    if OVERSEER_REQUIRE_TAILNET and not _is_private_or_tailscale(client_ip):
+        raise HTTPException(status_code=403, detail=f"node access requires private or tailscale ip, got {client_ip}")
+    if OVERSEER_ALLOWED_NODE_IDS and node_id not in OVERSEER_ALLOWED_NODE_IDS:
+        raise HTTPException(status_code=403, detail=f"node {node_id} is not allowlisted")
+    if OVERSEER_OWNER_ID and owner and owner != OVERSEER_OWNER_ID:
+        raise HTTPException(status_code=403, detail="owner mismatch")
+    return client_ip
+
 token_ledger: dict[str, int] = {}
 
 _system_prompt_cache: tuple[float, str] | None = None
 _SYSTEM_PROMPT_TTL = 300  # 5 minutes
+_health_probe_cache: tuple[float, dict] | None = None
+_HEALTH_PROBE_TTL = 30
+_node_registry: dict[str, NodeRecord] = {}
+_node_lock = threading.Lock()
 
 _SKIP_EXTRACTION_RE = re.compile(
     r"^\s*(hi|hello|hey|ok|k|thanks|thx|sure|yes|no|yep|nope|cool|got it|lol|haha|bye|done|nice)\W*$",
@@ -270,6 +381,91 @@ def kv_set(key: str, value: str, ttl: int = 86400) -> str:
         return f"stored {key}" if data.get("stored") else f"[kv_set failed]"
     except Exception as e:
         return f"[kv_set error: {e}]"
+
+
+async def _probe_url(url: str, headers: dict[str, str] | None = None, timeout: float = 5.0) -> str:
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(url, headers=headers)
+        return "ok" if response.is_success else f"http {response.status_code}"
+    except Exception as exc:
+        return f"error: {type(exc).__name__}"
+
+
+async def _health_probes() -> dict:
+    global _health_probe_cache
+
+    now = time.monotonic()
+    if _health_probe_cache and now - _health_probe_cache[0] < _HEALTH_PROBE_TTL:
+        return _health_probe_cache[1]
+
+    probe_jobs: dict[str, asyncio.Future] = {}
+    provider_statuses: dict[str, str] = {}
+
+    if OPENROUTER_API_KEY and OPENROUTER_MODELS:
+        probe_jobs["openrouter"] = asyncio.create_task(
+            _probe_url(
+                f"{OPENROUTER_BASE}/models",
+                headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"},
+            )
+        )
+    else:
+        provider_statuses["openrouter"] = "disabled"
+
+    if GEMINI_API_KEY:
+        probe_jobs["gemini"] = asyncio.create_task(
+            _probe_url(
+                "https://generativelanguage.googleapis.com/v1beta/models",
+                timeout=5.0,
+                headers=None,
+            )
+        )
+    else:
+        provider_statuses["gemini"] = "disabled"
+
+    if GROQ_API_KEY:
+        probe_jobs["groq"] = asyncio.create_task(
+            _probe_url(
+                f"{GROQ_BASE}/models",
+                headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+            )
+        )
+    else:
+        provider_statuses["groq"] = "disabled"
+
+    if OLLAMA_URL:
+        probe_jobs["ollama"] = asyncio.create_task(_probe_url(f"{OLLAMA_URL}/api/tags", timeout=5.0))
+    else:
+        provider_statuses["ollama"] = "disabled"
+
+    worker_status = "disabled"
+    if WORKER_URL:
+        worker_status = await _probe_url(
+            f"{WORKER_URL}/health",
+            headers={"Authorization": f"Bearer {WORKER_SECRET}"} if WORKER_SECRET else None,
+            timeout=5.0,
+        )
+
+    if probe_jobs:
+        results = await asyncio.gather(*probe_jobs.values(), return_exceptions=True)
+        for name, result in zip(probe_jobs.keys(), results):
+            if isinstance(result, Exception):
+                provider_statuses[name] = f"error: {type(result).__name__}"
+            else:
+                provider_statuses[name] = result
+
+    enabled_statuses = [status for status in provider_statuses.values() if status != "disabled"]
+    backend_status = "ok" if any(status == "ok" for status in enabled_statuses) else (
+        enabled_statuses[0] if enabled_statuses else "no providers configured"
+    )
+
+    data = {
+        "provider_statuses": provider_statuses,
+        "worker_status": worker_status,
+        "backend_status": backend_status,
+    }
+    _health_probe_cache = (now, data)
+    return data
 
 
 TOOLS_MAP = {
@@ -441,6 +637,26 @@ async def _ollama_chat(messages: list[dict]) -> dict:
         return {"content": msg.get("content") or "", "tool_calls": msg.get("tool_calls") or [], "_backend_used": "ollama"}
 
 
+async def _remote_node_chat(messages: list[dict]) -> dict:
+    nodes = [node for node in _trusted_nodes() if "chat" in node.capabilities]
+    if not nodes:
+        raise RuntimeError("no trusted local nodes available")
+    node = nodes[0]
+    async with httpx.AsyncClient(timeout=120) as client:
+        r = await client.post(
+            f"{node.inference_url.rstrip('/')}/infer/chat",
+            headers={"X-Overseer-Node-Secret": OVERSEER_NODE_SECRET, "Content-Type": "application/json"},
+            json={"messages": messages, "tools": TOOLS_SPEC},
+        )
+        r.raise_for_status()
+        data = r.json()
+        return {
+            "content": data.get("content") or "",
+            "tool_calls": data.get("tool_calls") or [],
+            "_backend_used": f"node:{node.node_id}",
+        }
+
+
 def _build_rotator() -> ProviderRotator:
     slots: list[_Slot] = []
     # OpenRouter gets first slots (most free-model variety, 3600s TTL per model)
@@ -468,8 +684,11 @@ _rotator = _build_rotator()
 
 
 async def llm_chat(messages: list[dict]) -> dict:
+    fallback_reason: str | None = None
     # Debug pin: if OVERSEER_BACKEND is set to a specific provider, skip rotation.
     if OVERSEER_BACKEND not in ("auto", ""):
+        if OVERSEER_BACKEND == "node":
+            return await _remote_node_chat(messages)
         if OVERSEER_BACKEND == "ollama":
             return await _ollama_chat(messages)
         if OVERSEER_BACKEND == "groq":
@@ -478,6 +697,13 @@ async def llm_chat(messages: list[dict]) -> dict:
             return await _openrouter_chat(messages)
         if OVERSEER_BACKEND == "gemini":
             return await _gemini_chat(messages)
+
+    if OVERSEER_PREFER_LOCAL_NODES and OVERSEER_NODE_SECRET:
+        try:
+            return await _remote_node_chat(messages)
+        except Exception as exc:
+            logging.warning("overseer: local node fallback triggered: %s", exc)
+            fallback_reason = f"local node unavailable: {type(exc).__name__}"
 
     # Rotation: try each slot in round-robin order, skip blocked ones.
     n = len(_rotator._slots)
@@ -493,12 +719,14 @@ async def llm_chat(messages: list[dict]) -> dict:
         try:
             result = await slot.call(messages)
             result.setdefault("_backend_used", slot.name)
+            if fallback_reason:
+                result.setdefault("_fallback_reason", fallback_reason)
             return result
         except RateLimitError:
             _rotator.block(slot)
         except Exception as exc:
             logging.warning("overseer: slot %s error (skipping): %s", slot.name, exc)
-    return {"content": "No providers available.", "tool_calls": [], "_backend_used": "none"}
+    return {"content": "No providers available.", "tool_calls": [], "_backend_used": "none", "_fallback_reason": fallback_reason}
 
 
 async def run_tool_loop(messages: list[dict]) -> tuple[str, list[str], str, str | None]:
@@ -616,8 +844,8 @@ ROUTING — when raw data arrives, route it:
 - Book mentioned (titled): wiki/personal/books.md (title, author, context) — append row
 - Movie mentioned (titled): wiki/personal/movies.md (title, year, context) — append row
 - Article or website mentioned: wiki/personal/articles.md — append row
-- New knowledge domain (not in vault after vault_search): wiki/knowledge/{slug}.md (create stub, tag [EMERGING])
-- Anything notable and recurring that doesn't fit above (habit, language practice, workout, game, tool, goal milestone, health metric): wiki/personal/tracking/{category-slug}.md — create page if missing, append row
+- New knowledge domain (not in vault after vault_search): wiki/knowledge/{{slug}}.md (create stub, tag [EMERGING])
+- Anything notable and recurring that doesn't fit above (habit, language practice, workout, game, tool, goal milestone, health metric): wiki/personal/tracking/{{category-slug}}.md — create page if missing, append row
 
 SKILLS — before performing a complex task, read the relevant skill file first:
 {skills_index or "(no skills loaded)"}
@@ -944,6 +1172,26 @@ class ProcessRawRequest(BaseModel):
     max_sessions: int = 10
 
 
+class NodeRegisterRequest(BaseModel):
+    node_id: str
+    hostname: str
+    tailscale_ip: str
+    inference_url: str
+    scope: str = "owner"
+    owner: str | None = None
+    models: list[str] = Field(default_factory=list)
+    capabilities: list[str] = Field(default_factory=lambda: ["chat"])
+    version: str | None = None
+    secret: str
+
+
+class NodeHeartbeatRequest(BaseModel):
+    node_id: str
+    secret: str
+    models: list[str] | None = None
+    capabilities: list[str] | None = None
+
+
 # ─── endpoints ────────────────────────────────────────────────────────────────
 
 @app.get("/")
@@ -960,6 +1208,8 @@ async def dashboard_ui(_: None = Depends(_auth)):
 async def status(_: None = Depends(_auth)):
     """Aggregate founder-helper data server-side to avoid browser CORS."""
     async def fetch(path: str, timeout: float = 5.0) -> dict:
+        if not FOUNDER_URL:
+            return {"error": "not configured"}
         try:
             async with httpx.AsyncClient(timeout=timeout) as c:
                 r = await c.get(f"{FOUNDER_URL}{path}")
@@ -979,30 +1229,7 @@ async def status(_: None = Depends(_auth)):
 
 @app.get("/health")
 async def health():
-    # Check at least one provider is reachable
-    backend_status = "unknown"
-    try:
-        if GEMINI_API_KEY:
-            async with httpx.AsyncClient(timeout=5) as c:
-                r = await c.get(
-                    "https://generativelanguage.googleapis.com/v1beta/models",
-                    params={"key": GEMINI_API_KEY},
-                )
-                backend_status = "ok" if r.status_code == 200 else f"gemini http {r.status_code}"
-        elif GROQ_API_KEY:
-            async with httpx.AsyncClient(timeout=5) as c:
-                r = await c.get(f"{GROQ_BASE}/models", headers={"Authorization": f"Bearer {GROQ_API_KEY}"})
-                backend_status = "ok" if r.status_code == 200 else f"groq http {r.status_code}"
-        elif OPENROUTER_API_KEY:
-            async with httpx.AsyncClient(timeout=5) as c:
-                r = await c.get(f"{OPENROUTER_BASE}/models", headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"})
-                backend_status = "ok" if r.status_code == 200 else f"openrouter http {r.status_code}"
-        else:
-            async with httpx.AsyncClient(timeout=5) as c:
-                r = await c.get(f"{OLLAMA_URL}/api/tags")
-                backend_status = "ok" if r.status_code == 200 else "unreachable"
-    except Exception as e:
-        backend_status = f"error: {e}"
+    probes = await _health_probes()
 
     vault_sync = ""
     try:
@@ -1015,15 +1242,22 @@ async def health():
     blocked_slots: dict[str, str] = {}
     if _rotator:
         active_slots, blocked_slots = _rotator.status()
+    trusted_nodes = [node.public_dict() for node in _trusted_nodes()]
 
     return {
         "backend": "rotator" if OVERSEER_BACKEND in ("auto", "") else OVERSEER_BACKEND,
         "active_slots": active_slots,
         "blocked_slots": blocked_slots,
-        "backend_status": backend_status,
+        "backend_status": probes["backend_status"],
+        "provider_statuses": probes["provider_statuses"],
+        "worker_status": probes["worker_status"],
         "vault_path": str(VAULT_PATH),
         "vault_last_sync": vault_sync,
         "token_ledger": token_ledger,
+        "node_registry_enabled": bool(OVERSEER_NODE_SECRET),
+        "allowed_node_ids": sorted(OVERSEER_ALLOWED_NODE_IDS),
+        "trusted_nodes": trusted_nodes,
+        "trusted_node_count": len(trusted_nodes),
     }
 
 
@@ -1067,6 +1301,49 @@ async def chat(req: ChatRequest, _: None = Depends(_auth)):
 async def extract(req: ExtractRequest, _: None = Depends(_auth)):
     result = await extract_entities(req.text)
     return result
+
+
+@app.get("/nodes")
+async def list_nodes(_: None = Depends(_auth)):
+    return {
+        "owner": OVERSEER_OWNER_ID or None,
+        "allowed_node_ids": sorted(OVERSEER_ALLOWED_NODE_IDS),
+        "nodes": [node.public_dict() for node in _trusted_nodes()],
+    }
+
+
+@app.post("/nodes/register")
+async def register_node(req: NodeRegisterRequest, request: Request):
+    client_ip = _node_access(request, req.node_id, req.secret, req.owner)
+    if req.scope != "owner":
+        raise HTTPException(status_code=403, detail="only owner-scoped nodes are allowed")
+    _validate_node_network(req.tailscale_ip, req.inference_url)
+    record = NodeRecord(
+        node_id=req.node_id,
+        hostname=req.hostname,
+        tailscale_ip=req.tailscale_ip,
+        inference_url=req.inference_url.rstrip("/"),
+        scope=req.scope,
+        owner=req.owner,
+        models=req.models,
+        capabilities=req.capabilities,
+        version=req.version,
+    )
+    with _node_lock:
+        _node_registry[req.node_id] = record
+    return {"registered": True, "client_ip": client_ip, "node": record.public_dict()}
+
+
+@app.post("/nodes/heartbeat")
+async def heartbeat_node(req: NodeHeartbeatRequest, request: Request):
+    client_ip = _node_access(request, req.node_id, req.secret)
+    with _node_lock:
+        record = _node_registry.get(req.node_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="node not registered")
+        record.touch(models=req.models, capabilities=req.capabilities)
+        snapshot = record.public_dict()
+    return {"ok": True, "client_ip": client_ip, "node": snapshot}
 
 
 @app.post("/process-raw")

@@ -1,10 +1,36 @@
 #!/usr/bin/env node
-import { API_KEY, API_URL, VERSION } from "./config.js";
+import { VERSION } from "./config.js";
+import { extractText, fetchHealth, formatApiError, getApiRuntime, sendChat } from "./api.js";
 
-function authHeaders() {
-  const h = { "Content-Type": "application/json" };
-  if (API_KEY) h["Authorization"] = `Bearer ${API_KEY}`;
-  return h;
+function tokenCount(health) {
+  return Object.values(health?.token_ledger ?? {}).reduce((a, b) => a + b, 0);
+}
+
+function formatHealthSummary(health) {
+  const parts = [
+    `status=${health.backend_status ?? "-"}`,
+    `backend=${health.backend ?? "-"}`,
+    `url=${health.api_url ?? health.api_urls?.[0] ?? getApiRuntime().defaultUrl}`,
+    `source=${health.api_source ?? getApiRuntime().source}`,
+  ];
+
+  if (health.connection_error) {
+    parts.push(`error=${health.connection_error}`);
+  } else {
+    parts.push(`vault=${(health.vault_last_sync || "").slice(0, 10) || "-"}`);
+    parts.push(`tokens=${tokenCount(health)}`);
+  }
+
+  return parts.join("  ");
+}
+
+function shortEndpoint(url) {
+  if (!url) return "-";
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
 }
 
 // ── one-shot mode ─────────────────────────────────────────────────────────────
@@ -13,28 +39,20 @@ const arg = process.argv[2];
 if (arg) {
   if (arg === "/health") {
     try {
-      const r = await fetch(`${API_URL}/health`, { signal: AbortSignal.timeout(5000) });
-      const d = await r.json();
-      const tokens = Object.values(d.token_ledger ?? {}).reduce((a, b) => a + b, 0);
-      console.log(`status=${d.backend_status}  model=${d.model}  vault=${(d.vault_last_sync || "").slice(0, 10)}  tokens=${tokens}`);
+      const d = await fetchHealth(AbortSignal.timeout(5000));
+      console.log(formatHealthSummary(d));
     } catch (e) {
-      console.error(`error: ${e.message}`);
+      console.error(`error: ${formatApiError(e)}`);
       process.exit(1);
     }
     process.exit(0);
   }
 
   try {
-    const r = await fetch(`${API_URL}/chat`, {
-      method: "POST",
-      headers: authHeaders(),
-      body: JSON.stringify({ message: process.argv.slice(2).join(" ") }),
-      signal: AbortSignal.timeout(90000),
-    });
-    const d = await r.json();
+    const d = await sendChat(process.argv.slice(2).join(" "), AbortSignal.timeout(90000));
     console.log(d.response || d.error || "no response");
   } catch (e) {
-    console.error(`error: ${e.message}`);
+    console.error(`error: ${formatApiError(e)}`);
     process.exit(1);
   }
   process.exit(0);
@@ -53,7 +71,6 @@ import {
   createSession, updateSessionTitle, listAllSessions,
   addMessage, getMessages, addExtraction, getExtractions,
 } from "./db.js";
-import { fetchHealth, sendChat } from "./api.js";
 
 // ── slash command registry ────────────────────────────────────────────────────
 
@@ -90,19 +107,19 @@ function CommandMenu({ input }) {
 
 function SpriteHeader({ health, lastBackend }) {
   const backend = health?.backend ?? "-";
-  const model = health?.model ?? "-";
   const vault = (health?.vault_last_sync ?? "").slice(0, 10) || "-";
   const status = health?.backend_status ?? "-";
   const isFallback = lastBackend && lastBackend !== backend;
   const backendLabel = isFallback ? `${backend}->${lastBackend}` : backend;
+  const endpoint = shortEndpoint(health?.api_url ?? health?.api_urls?.[0]);
 
   return (
     <Box paddingX={2} paddingTop={1} paddingBottom={0}>
       <Sprite />
       <Box flexDirection="column" paddingLeft={2} justifyContent="center">
         <Text color="white" bold>{`Overseer v${VERSION}`}</Text>
-        <Text color={isFallback ? "#e06c00" : "#aaa"}>{`${backendLabel}/${model}  ${status === "ok" ? "ok" : status}`}</Text>
-        <Text color="#666">{`vault ${vault}`}</Text>
+        <Text color={isFallback ? "#e06c00" : "#aaa"}>{`${backendLabel}  ${status === "ok" ? "ok" : status}`}</Text>
+        <Text color="#666">{`vault ${vault}  api ${endpoint}`}</Text>
       </Box>
     </Box>
   );
@@ -153,8 +170,16 @@ function App() {
       const h = await fetchHealth(AbortSignal.timeout(5000));
       setHealth(h);
       return h;
-    } catch {
-      const err = { backend_status: "unreachable" };
+    } catch (error) {
+      const runtime = getApiRuntime();
+      const err = {
+        backend: "-",
+        backend_status: "unreachable",
+        api_url: runtime.resolvedUrl || runtime.defaultUrl,
+        api_urls: runtime.configuredUrls,
+        api_source: runtime.source,
+        connection_error: formatApiError(error),
+      };
       setHealth(err);
       return err;
     }
@@ -205,9 +230,10 @@ function App() {
     abortRef.current = controller;
 
     try {
-      const d = await sendChat(text, controller.signal);
+      const d = await sendChat(text, controller.signal, health.api_url);
       const took = (Date.now() - t0) / 1000;
       setElapsed(took);
+      setHealth((prev) => ({ ...prev, api_url: d.api_url, api_urls: d.api_urls ?? prev.api_urls, api_source: d.api_source ?? prev.api_source }));
 
       const toolCalls = d.tool_calls ?? [];
       const response = d.response || d.error || "no response";
@@ -226,18 +252,10 @@ function App() {
 
       void (async () => {
         try {
-          const r = await fetch(`${API_URL}/extract`, {
-            method: "POST",
-            headers: authHeaders(),
-            body: JSON.stringify({ text, session_id: sessionId }),
-            signal: AbortSignal.timeout(30000),
-          });
-          if (r.ok) {
-            const ex = await r.json();
-            if (ex.entities && !ex.error) {
-              addExtraction(sessionId, userMsgId, ex.entities, ex.vault_writes ?? []);
-              setExtractions(getExtractions(sessionId));
-            }
+          const ex = await extractText(text, sessionId, AbortSignal.timeout(30000), d.api_url);
+          if (ex.entities && !ex.error) {
+            addExtraction(sessionId, userMsgId, ex.entities, ex.vault_writes ?? []);
+            setExtractions(getExtractions(sessionId));
           }
         } catch {}
       })();
@@ -247,7 +265,7 @@ function App() {
         addMsg({ role: "assistant", content: "stopped." });
       } else {
         setElapsed((Date.now() - t0) / 1000);
-        addMsg({ role: "error", content: `error: ${e.message}` });
+        addMsg({ role: "error", content: `error: ${formatApiError(e)}` });
       }
     } finally {
       setSending(false);
@@ -275,14 +293,13 @@ function App() {
       setPhase("sessions");
     } else if (cmd === "/health") {
       const h = await loadHealth();
-      const tokens = Object.values(h.token_ledger ?? {}).reduce((a, b) => a + b, 0);
-      addMsg({ role: "system", content: `status=${h.backend_status}  model=${h.model}  vault=${(h.vault_last_sync || "").slice(0, 10)}  tokens=${tokens}` });
+      addMsg({ role: "system", content: formatHealthSummary(h) });
     } else if (cmd === "/model") {
       const h = await loadHealth();
       const ledger = h.token_ledger ?? {};
       const ledgerStr = Object.entries(ledger).map(([m, t]) => `${m}=${t}`).join("  ") || "no usage yet";
       const actual = lastBackend ?? h.backend;
-      addMsg({ role: "system", content: `backend=${h.backend}  active=${actual}  model=${h.model}\ntokens: ${ledgerStr}` });
+      addMsg({ role: "system", content: `backend=${h.backend}  active=${actual}  url=${h.api_url ?? h.api_urls?.[0] ?? "-"}\ntokens: ${ledgerStr}` });
     } else if (cmd === "/quit" || cmd === "/exit") {
       exit();
     } else {

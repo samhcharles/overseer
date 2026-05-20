@@ -11,4 +11,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY main.py index.html dashboard.html .
 
 EXPOSE 8765
+HEALTHCHECK --interval=15s --timeout=5s --retries=3 CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/health', timeout=5)"
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8765"]
