@@ -21,6 +21,22 @@ services:
     networks:
       - coolify
       - internal
+    labels:
+      - traefik.enable=true
+      - traefik.http.middlewares.gzip.compress=true
+      - traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https
+      - traefik.http.routers.http-0-${COOLIFY_RESOURCE_UUID}.entryPoints=http
+      - traefik.http.routers.http-0-${COOLIFY_RESOURCE_UUID}.middlewares=gzip
+      - traefik.http.routers.http-0-${COOLIFY_RESOURCE_UUID}.rule=Host(`${COOLIFY_FQDN}`) && PathPrefix(`/`)
+      - traefik.http.routers.http-0-${COOLIFY_RESOURCE_UUID}.service=http-0-${COOLIFY_RESOURCE_UUID}
+      - traefik.http.services.http-0-${COOLIFY_RESOURCE_UUID}.loadbalancer.server.port=8765
+      - caddy_0.encode=zstd gzip
+      - caddy_0.handle_path.0_reverse_proxy={{upstreams 8765}}
+      - caddy_0.handle_path=/*
+      - caddy_0.header=-Server
+      - caddy_0.try_files={path} /index.html /index.php
+      - caddy_0=http://${COOLIFY_FQDN}
+      - caddy_ingress_network=coolify
 
   vault-sync:
     image: alpine/git
