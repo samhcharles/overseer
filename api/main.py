@@ -532,7 +532,7 @@ async def run_tool_loop(messages: list[dict]) -> tuple[str, list[str], str, str 
             result = tool_fn(**args) if tool_fn else f"[unknown tool: {name}]"
 
             # Groq needs tool_call_id in the tool response
-            tool_msg: dict = {"role": "tool", "content": str(result)[:2000]}
+            tool_msg: dict = {"role": "tool", "content": str(result)[:8000]}
             if "id" in tc:
                 tool_msg["tool_call_id"] = tc["id"]
             messages.append(tool_msg)
@@ -613,6 +613,10 @@ ROUTING — when raw data arrives, route it:
 - System or infra change: wiki/systems/NAME.md
 - Work session debrief: wiki/sessions/YYYY-MM-DD-SLUG.md
 - Anything else raw: inbox/yap/YYYY-MM-DD-SLUG.md
+- Book mentioned (titled): wiki/personal/books.md (title, author, context) — append row
+- Movie mentioned (titled): wiki/personal/movies.md (title, year, context) — append row
+- Article or website mentioned: wiki/personal/articles.md — append row
+- New knowledge domain (not in vault after vault_search): wiki/knowledge/{slug}.md (create stub, tag [EMERGING])
 
 SKILLS — before performing a complex task, read the relevant skill file first:
 {skills_index or "(no skills loaded)"}
@@ -654,7 +658,11 @@ Return ONLY valid JSON, no other text:
   "events": [{{"description": "string", "date_hint": "string", "approximate": true}}],
   "todos": [{{"task": "string", "person": "string or null", "urgency": "normal"}}],
   "locations": [{{"name": "string", "context": "string"}}],
-  "facts": [{{"category": "preference|recurring|personal", "content": "string"}}]
+  "facts": [{{"category": "preference|recurring|personal", "content": "string"}}],
+  "books": [{{"title": "string", "author": "string or null", "context": "string"}}],
+  "movies": [{{"title": "string", "year": "string or null", "context": "string"}}],
+  "articles": [{{"title": "string", "source": "string or null", "url": "string or null"}}],
+  "knowledge_domains": [{{"domain": "string", "context": "string"}}]
 }}
 
 Rules:
@@ -662,19 +670,15 @@ Rules:
 - Interpret relative dates relative to {local_dt}.
 - Mark approximate dates with "approximate": true.
 - If nothing to extract for a category, use empty array.
+- Extract books, movies, articles only when explicitly named — not general references.
+- knowledge_domains: only when a distinct field of study or practice is clearly being engaged with.
 
 Text: {text}"""
 
+    messages = [{"role": "user", "content": prompt}]
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.post(
-                f"{GROQ_BASE}/chat/completions",
-                headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
-                json={"model": GROQ_MODEL, "messages": [{"role": "user", "content": prompt}]},
-            )
-            if not r.is_success:
-                return {"error": f"groq {r.status_code}", "vault_writes": []}
-            raw = r.json()["choices"][0]["message"]["content"]
+        response = await llm_chat(messages)
+        raw = response["content"]
         start = raw.find("{")
         end = raw.rfind("}") + 1
         entities = json.loads(raw[start:end])
@@ -780,6 +784,102 @@ Text: {text}"""
         vault_write(rec_path, updated_rec, "overseer: update recurring")
         vault_writes.append(rec_path)
 
+    # Books → wiki/personal/books.md
+    for book in entities.get("books", []):
+        title = (book.get("title") or "").strip()
+        if not title:
+            continue
+        books_path = "wiki/personal/books.md"
+        existing = vault_read(books_path)
+        author = book.get("author") or "unknown"
+        context = book.get("context") or ""
+        entry = f"| {title} | {author} | {today} | {context} |"
+        if "[not found:" not in existing:
+            if title not in existing:
+                updated = existing.rstrip() + f"\n{entry}\n"
+                vault_write(books_path, updated, f"overseer: book — {title}")
+                vault_writes.append(books_path)
+        else:
+            content = (
+                f"---\ntitle: Books\npartition: personal\nsources: [overseer]\n"
+                f"created: {today}\nupdated: {today}\ntags: [personal, books, media]\n---\n\n"
+                f"# Books\n\nAgent-owned. Overseer appends from sessions and yap.\n\n"
+                f"| Title | Author | Date mentioned | Context |\n|---|---|---|---|\n{entry}\n"
+            )
+            vault_write(books_path, content, f"overseer: create books.md — {title}")
+            vault_writes.append(books_path)
+
+    # Movies → wiki/personal/movies.md
+    for movie in entities.get("movies", []):
+        title = (movie.get("title") or "").strip()
+        if not title:
+            continue
+        movies_path = "wiki/personal/movies.md"
+        existing = vault_read(movies_path)
+        year = movie.get("year") or ""
+        context = movie.get("context") or ""
+        entry = f"| {title} | {year} | {today} | {context} |"
+        if "[not found:" not in existing:
+            if title not in existing:
+                updated = existing.rstrip() + f"\n{entry}\n"
+                vault_write(movies_path, updated, f"overseer: movie — {title}")
+                vault_writes.append(movies_path)
+        else:
+            content = (
+                f"---\ntitle: Movies\npartition: personal\nsources: [overseer]\n"
+                f"created: {today}\nupdated: {today}\ntags: [personal, movies, media]\n---\n\n"
+                f"# Movies\n\nAgent-owned. Overseer appends from sessions and yap.\n\n"
+                f"| Title | Year | Date mentioned | Context |\n|---|---|---|---|\n{entry}\n"
+            )
+            vault_write(movies_path, content, f"overseer: create movies.md — {title}")
+            vault_writes.append(movies_path)
+
+    # Articles → wiki/personal/articles.md
+    for article in entities.get("articles", []):
+        title = (article.get("title") or "").strip()
+        if not title:
+            continue
+        articles_path = "wiki/personal/articles.md"
+        existing = vault_read(articles_path)
+        source = article.get("source") or ""
+        url = article.get("url") or ""
+        entry = f"| {title} | {source} | {url} | {today} |"
+        if "[not found:" not in existing:
+            if title not in existing:
+                updated = existing.rstrip() + f"\n{entry}\n"
+                vault_write(articles_path, updated, f"overseer: article — {title}")
+                vault_writes.append(articles_path)
+        else:
+            content = (
+                f"---\ntitle: Articles\npartition: personal\nsources: [overseer]\n"
+                f"created: {today}\nupdated: {today}\ntags: [personal, articles, media]\n---\n\n"
+                f"# Articles\n\nAgent-owned. Overseer appends from sessions and yap.\n\n"
+                f"| Title | Source | URL | Date |\n|---|---|---|---|\n{entry}\n"
+            )
+            vault_write(articles_path, content, f"overseer: create articles.md — {title}")
+            vault_writes.append(articles_path)
+
+    # Knowledge domains → wiki/knowledge/{slug}.md
+    for kd in entities.get("knowledge_domains", []):
+        domain = (kd.get("domain") or "").strip()
+        if not domain:
+            continue
+        slug = domain.lower().replace(" ", "-").replace("/", "-")
+        kd_path = f"wiki/knowledge/{slug}.md"
+        existing = vault_read(kd_path)
+        context = kd.get("context") or ""
+        if "[not found:" in existing:
+            search_result = vault_search(domain)
+            if "[no results]" in search_result or not search_result.strip():
+                content = (
+                    f"---\ntitle: {domain}\npartition: knowledge\nsources: [overseer]\n"
+                    f"created: {today}\nupdated: {today}\ntags: [knowledge, emerging]\n---\n\n"
+                    f"# {domain}\n\n[EMERGING] — first mentioned {today}.\n\n{context}\n\n"
+                    f"Overseer will deepen this page as more sessions reference it.\n"
+                )
+                vault_write(kd_path, content, f"overseer: emerging domain — {domain}")
+                vault_writes.append(kd_path)
+
     return {"entities": entities, "vault_writes": vault_writes}
 
 
@@ -803,6 +903,10 @@ class RememberRequest(BaseModel):
 class ExtractRequest(BaseModel):
     text: str
     session_id: str | None = None
+
+
+class ProcessRawRequest(BaseModel):
+    max_sessions: int = 10
 
 
 # ─── endpoints ────────────────────────────────────────────────────────────────
@@ -928,6 +1032,136 @@ async def chat(req: ChatRequest, _: None = Depends(_auth)):
 async def extract(req: ExtractRequest, _: None = Depends(_auth)):
     result = await extract_entities(req.text)
     return result
+
+
+@app.post("/process-raw")
+async def process_raw(req: ProcessRawRequest, _: None = Depends(_auth)):
+    """Process unprocessed raw AI session files from vault/raw/sessions/."""
+    raw_dir = VAULT_PATH / "raw" / "sessions"
+    manifest_path = raw_dir / ".processed"
+
+    if not raw_dir.exists():
+        return {"processed": 0, "skipped": 0, "sessions": [], "message": "raw/sessions/ not found"}
+
+    # Load manifest (processed session_ids)
+    processed_ids: set[str] = set()
+    if manifest_path.exists():
+        for line in manifest_path.read_text().splitlines():
+            line = line.strip()
+            if line:
+                processed_ids.add(line)
+
+    # Find unprocessed .md files (sorted oldest first by filename)
+    candidates = sorted(
+        [f for f in raw_dir.glob("*.md") if f.name != ".processed"],
+        key=lambda f: f.name
+    )
+
+    results: list[str] = []
+    skipped = 0
+    processed = 0
+
+    tz = ZoneInfo(USER_TIMEZONE)
+    today = datetime.now(tz).strftime("%Y-%m-%d")
+
+    for session_file in candidates:
+        if processed >= req.max_sessions:
+            break
+
+        # Parse frontmatter to check processed flag and session_id
+        content = session_file.read_text()
+        lines = content.splitlines()
+
+        session_id = None
+        already_processed = False
+
+        if lines and lines[0] == "---":
+            for i, line in enumerate(lines[1:], 1):
+                if line == "---":
+                    break
+                if line.startswith("session_id:"):
+                    session_id = line.split(":", 1)[1].strip()
+                if line.startswith("processed:") and "true" in line.lower():
+                    already_processed = True
+
+        if already_processed or (session_id and session_id in processed_ids):
+            skipped += 1
+            continue
+
+        # Extract user+assistant text turns only for the LLM prompt (not tool blobs)
+        # Raw file keeps full fidelity; we send a cleaned version to the LLM
+        clean_lines = []
+        in_tool_block = False
+        for line in lines:
+            if line.startswith("### Tool:") or line.startswith("**Tool result"):
+                in_tool_block = True
+            elif line.startswith("### ") and in_tool_block:
+                in_tool_block = False
+            if not in_tool_block:
+                clean_lines.append(line)
+
+        clean_text = "\n".join(clean_lines)
+        # Cap at 12000 words to stay within provider context windows
+        words = clean_text.split()
+        if len(words) > 12000:
+            clean_text = " ".join(words[:12000]) + "\n\n[TRUNCATED — session continues in raw file]"
+
+        session_prompt = f"""Analyze this AI session transcript and route all signal into the vault.
+
+Use your tools (vault_read, vault_write, vault_search) to:
+1. Extract and store: people, books, movies, articles, decisions, project updates, preferences, recurring events
+2. Before any write: vault_read() the target page and merge — never overwrite
+3. Books → wiki/personal/books.md (append row: title, author, context)
+4. Movies → wiki/personal/movies.md (append row: title, year, context)
+5. Project updates → find the relevant wiki/madhouse/ or wiki/orinadus/ page
+6. Decisions → wiki/systems/decisions.md (append)
+7. New knowledge domain (vault_search finds nothing): create wiki/knowledge/{{slug}}.md with [EMERGING] tag
+8. If session contradicts existing wiki content: update the page AND append "[DRIFT RESOLVED {today}]" to wiki/_log.md
+9. Only extract what is explicitly stated. No inference.
+
+Session:
+---
+{clean_text[:8000]}
+---
+
+After processing, confirm what you stored and where (one line each)."""
+
+        messages = [{"role": "system", "content": system_prompt()},
+                    {"role": "user", "content": session_prompt}]
+
+        try:
+            response_text, tool_log, backend, _ = await run_tool_loop(messages)
+        except Exception as e:
+            results.append(f"ERROR {session_file.name}: {e}")
+            continue
+
+        # Mark as processed in frontmatter
+        updated_content = content.replace("processed: false", "processed: true", 1)
+        session_file.write_text(updated_content)
+
+        # Append to manifest
+        if session_id:
+            with manifest_path.open("a") as f:
+                f.write(f"{session_id}\n")
+            processed_ids.add(session_id)
+
+        # Commit the processed flag update
+        try:
+            subprocess.run(["git", "-C", str(VAULT_PATH), "add", str(session_file)], check=True, capture_output=True)
+            if manifest_path.exists():
+                subprocess.run(["git", "-C", str(VAULT_PATH), "add", str(manifest_path)], check=True, capture_output=True)
+            subprocess.run(
+                ["git", "-C", str(VAULT_PATH), "commit", "-m", f"overseer: processed session {session_file.name}"],
+                check=True, capture_output=True
+            )
+            subprocess.run(["git", "-C", str(VAULT_PATH), "push", "origin", "main"], capture_output=True)
+        except subprocess.CalledProcessError:
+            pass
+
+        results.append(session_file.name)
+        processed += 1
+
+    return {"processed": processed, "skipped": skipped, "sessions": results}
 
 
 @app.post("/triage")
