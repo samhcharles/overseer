@@ -16,6 +16,8 @@ services:
       - OVERSEER_API_KEY=${OVERSEER_API_KEY}
       - VAULT_PATH=/vault
       - USER_TIMEZONE=${USER_TIMEZONE:-America/Los_Angeles}
+    ports:
+      - "${OVERSEER_BIND_HOST:-100.73.12.59}:8765:8765"
     volumes:
       - vault_data:/vault
     networks:
