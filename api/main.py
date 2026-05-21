@@ -19,10 +19,11 @@ import re
 import subprocess
 import threading
 import time
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Literal
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
@@ -33,40 +34,21 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
 VAULT_PATH = Path(os.environ.get("VAULT_PATH", "/home/ubuntu/vault"))
-# "auto" = rotate across all configured free providers. Set to a provider name to pin (debug).
-OVERSEER_BACKEND = os.environ.get("OVERSEER_BACKEND", "auto")
 FOUNDER_URL = os.environ.get("FOUNDER_URL", "").rstrip("/")
 
-# Gemini — free 1M tokens/day, 1M context. Get key at aistudio.google.com
+# Provider secrets stay env-backed. Editable runtime settings live in runtime-config.json.
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/openai"
 
-# Groq — 100k tokens/day free tier
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
-GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
 GROQ_BASE = "https://api.groq.com/openai/v1"
 
-# OpenRouter — free-tier aggregator. All models must end :free (billing guard enforced below).
-# OPENROUTER_MODELS: comma-separated list of :free models to rotate through.
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
-OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "google/gemini-2.0-flash-exp:free")  # legacy alias
-_OR_MODELS_RAW = os.environ.get(
-    "OPENROUTER_MODELS",
-    "google/gemini-2.0-flash-exp:free,meta-llama/llama-3.3-70b-instruct:free,deepseek/deepseek-chat-v3-0324:free",
-)
-OPENROUTER_MODELS: list[str] = [m.strip() for m in _OR_MODELS_RAW.split(",") if m.strip().endswith(":free")]
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 
-# Ollama — self-hosted (Oracle A1). No rate limits.
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:14b")
-
-# Cloudflare Worker settings (edge tools: fetch, KV, webhook, cron)
 WORKER_URL = os.environ.get("WORKER_URL", "")
 WORKER_SECRET = os.environ.get("WORKER_SECRET", "")
 
-# API auth — if set, all endpoints except /health require Bearer token
 OVERSEER_API_KEY = os.environ.get("OVERSEER_API_KEY", "")
 
 USER_TIMEZONE = os.environ.get("USER_TIMEZONE", "America/Los_Angeles")
@@ -75,7 +57,154 @@ OVERSEER_ALLOWED_NODE_IDS = {v.strip() for v in os.environ.get("OVERSEER_ALLOWED
 OVERSEER_OWNER_ID = os.environ.get("OVERSEER_OWNER_ID", "").strip()
 OVERSEER_NODE_TTL = int(os.environ.get("OVERSEER_NODE_TTL", "90"))
 OVERSEER_REQUIRE_TAILNET = os.environ.get("OVERSEER_REQUIRE_TAILNET", "true").lower() not in {"0", "false", "no"}
-OVERSEER_PREFER_LOCAL_NODES = os.environ.get("OVERSEER_PREFER_LOCAL_NODES", "true").lower() not in {"0", "false", "no"}
+DEFAULT_OVERSEER_BACKEND = os.environ.get("OVERSEER_BACKEND", "auto")
+DEFAULT_GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+DEFAULT_GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+DEFAULT_OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "google/gemini-2.0-flash-exp:free")
+DEFAULT_OPENROUTER_MODELS_RAW = os.environ.get(
+    "OPENROUTER_MODELS",
+    "google/gemini-2.0-flash-exp:free,meta-llama/llama-3.3-70b-instruct:free,deepseek/deepseek-chat-v3-0324:free",
+)
+DEFAULT_OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
+DEFAULT_OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:14b")
+DEFAULT_PREFER_LOCAL_NODES = os.environ.get("OVERSEER_PREFER_LOCAL_NODES", "true").lower() not in {"0", "false", "no"}
+VALID_BACKENDS = {"auto", "gemini", "groq", "openrouter", "ollama", "node"}
+RUNTIME_CONFIG_VERSION = 1
+DEFAULT_CONFIG_DIR = Path("/config") if Path("/config").is_dir() else Path.home() / ".local" / "state" / "overseer"
+OVERSEER_CONFIG_DIR = Path(os.environ.get("OVERSEER_CONFIG_DIR", str(DEFAULT_CONFIG_DIR)))
+RUNTIME_CONFIG_PATH = OVERSEER_CONFIG_DIR / "runtime-config.json"
+
+
+def _clean_text(value: object, fallback: str = "") -> str:
+    if value is None:
+        return fallback
+    cleaned = str(value).strip()
+    return cleaned or fallback
+
+
+def _clean_url(value: object, fallback: str = "") -> str:
+    return _clean_text(value, fallback).rstrip("/")
+
+
+def _bool_value(value: object, fallback: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return fallback
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+    return fallback
+
+
+def _parse_model_list(value: object, *, require_free: bool = False) -> list[str]:
+    if isinstance(value, str):
+        items = value.split(",")
+    elif isinstance(value, list):
+        items = value
+    else:
+        items = []
+    models: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        model = _clean_text(item)
+        if not model:
+            continue
+        if require_free and not model.endswith(":free"):
+            continue
+        if model in seen:
+            continue
+        seen.add(model)
+        models.append(model)
+    return models
+
+
+def _runtime_defaults() -> dict:
+    return {
+        "version": RUNTIME_CONFIG_VERSION,
+        "backend": _clean_text(DEFAULT_OVERSEER_BACKEND, "auto"),
+        "prefer_local_nodes": DEFAULT_PREFER_LOCAL_NODES,
+        "providers": {
+            "gemini": {
+                "enabled": bool(GEMINI_API_KEY),
+                "model": _clean_text(DEFAULT_GEMINI_MODEL, "gemini-2.0-flash"),
+            },
+            "groq": {
+                "enabled": bool(GROQ_API_KEY),
+                "model": _clean_text(DEFAULT_GROQ_MODEL, "llama-3.3-70b-versatile"),
+            },
+            "openrouter": {
+                "enabled": bool(OPENROUTER_API_KEY),
+                "model": _clean_text(DEFAULT_OPENROUTER_MODEL, "google/gemini-2.0-flash-exp:free"),
+                "models": _parse_model_list(DEFAULT_OPENROUTER_MODELS_RAW, require_free=True),
+            },
+            "ollama": {
+                "enabled": bool(_clean_url(DEFAULT_OLLAMA_URL, "http://localhost:11434")),
+                "url": _clean_url(DEFAULT_OLLAMA_URL, "http://localhost:11434"),
+                "model": _clean_text(DEFAULT_OLLAMA_MODEL, "qwen2.5:14b"),
+            },
+        },
+    }
+
+
+def _normalize_runtime_config(raw: dict | None) -> dict:
+    defaults = _runtime_defaults()
+    cfg = deepcopy(defaults)
+    if isinstance(raw, dict):
+        backend = _clean_text(raw.get("backend"), defaults["backend"])
+        cfg["backend"] = backend if backend in VALID_BACKENDS else "auto"
+        cfg["prefer_local_nodes"] = _bool_value(raw.get("prefer_local_nodes"), defaults["prefer_local_nodes"])
+
+        providers_raw = raw.get("providers")
+        if isinstance(providers_raw, dict):
+            for provider_name in cfg["providers"]:
+                current = cfg["providers"][provider_name]
+                entry = providers_raw.get(provider_name)
+                if not isinstance(entry, dict):
+                    continue
+                current["enabled"] = _bool_value(entry.get("enabled"), current["enabled"])
+                if provider_name == "openrouter":
+                    current["model"] = _clean_text(entry.get("model"), current["model"])
+                    current["models"] = _parse_model_list(entry.get("models"), require_free=True) or current["models"]
+                    if current["model"].endswith(":free") and current["model"] not in current["models"]:
+                        current["models"].insert(0, current["model"])
+                    if current["models"] and current["model"] not in current["models"]:
+                        current["model"] = current["models"][0]
+                elif provider_name == "ollama":
+                    current["url"] = _clean_url(entry.get("url"), current["url"])
+                    current["model"] = _clean_text(entry.get("model"), current["model"])
+                else:
+                    current["model"] = _clean_text(entry.get("model"), current["model"])
+
+    if cfg["backend"] == "openrouter":
+        models = cfg["providers"]["openrouter"]["models"]
+        if not models:
+            cfg["backend"] = "auto"
+        elif cfg["providers"]["openrouter"]["model"] not in models:
+            cfg["providers"]["openrouter"]["model"] = models[0]
+    if cfg["backend"] == "ollama" and not cfg["providers"]["ollama"]["url"]:
+        cfg["backend"] = "auto"
+    return cfg
+
+
+def _load_runtime_config() -> dict:
+    if not RUNTIME_CONFIG_PATH.exists():
+        return _normalize_runtime_config(None)
+    try:
+        raw = json.loads(RUNTIME_CONFIG_PATH.read_text())
+    except Exception:
+        logging.warning("overseer: failed to read runtime config at %s, falling back to defaults", RUNTIME_CONFIG_PATH)
+        return _normalize_runtime_config(None)
+    return _normalize_runtime_config(raw)
+
+
+_runtime_config = _load_runtime_config()
+_config_lock = threading.Lock()
 
 app = FastAPI(title="Overseer API", version="1.0.0")
 
@@ -257,7 +386,7 @@ def _node_access(request: Request, node_id: str, secret: str, owner: str | None 
 
 token_ledger: dict[str, int] = {}
 
-_system_prompt_cache: tuple[float, str] | None = None
+_system_prompt_cache: dict[str, tuple[float, str]] = {}
 _SYSTEM_PROMPT_TTL = 300  # 5 minutes
 _health_probe_cache: tuple[float, dict] | None = None
 _HEALTH_PROBE_TTL = 30
@@ -270,12 +399,80 @@ _SKIP_EXTRACTION_RE = re.compile(
 )
 
 
+def _config_copy() -> dict:
+    with _config_lock:
+        return deepcopy(_runtime_config)
+
+
+def _persist_runtime_config(cfg: dict) -> None:
+    RUNTIME_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = RUNTIME_CONFIG_PATH.with_suffix(".tmp")
+    tmp_path.write_text(json.dumps(cfg, indent=2, sort_keys=True) + "\n")
+    tmp_path.replace(RUNTIME_CONFIG_PATH)
+
+
+def _available_backend_names(cfg: dict | None = None) -> list[str]:
+    config = cfg or _config_copy()
+    names = ["auto"]
+    if OVERSEER_NODE_SECRET:
+        names.append("node")
+    providers = config["providers"]
+    if providers["openrouter"]["enabled"] and OPENROUTER_API_KEY and providers["openrouter"]["models"]:
+        names.append("openrouter")
+    if providers["gemini"]["enabled"] and GEMINI_API_KEY:
+        names.append("gemini")
+    if providers["groq"]["enabled"] and GROQ_API_KEY:
+        names.append("groq")
+    if providers["ollama"]["enabled"] and providers["ollama"]["url"]:
+        names.append("ollama")
+    return names
+
+
+async def _ollama_models(ollama_url: str) -> list[str]:
+    target = _clean_url(ollama_url)
+    if not target:
+        return []
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(f"{target}/api/tags")
+            response.raise_for_status()
+            payload = response.json()
+        return [item.get("name") for item in payload.get("models", []) if item.get("name")]
+    except Exception:
+        return []
+
+
+def _update_runtime_config(changes: dict) -> dict:
+    global _runtime_config, _health_probe_cache
+    with _config_lock:
+        next_cfg = deepcopy(_runtime_config)
+        next_cfg["version"] = RUNTIME_CONFIG_VERSION
+        next_cfg["backend"] = changes.get("backend", next_cfg["backend"])
+        next_cfg["prefer_local_nodes"] = changes.get("prefer_local_nodes", next_cfg["prefer_local_nodes"])
+        providers = next_cfg["providers"]
+        for provider_name in ("gemini", "groq", "openrouter", "ollama"):
+            provider_changes = changes.get("providers", {}).get(provider_name, {})
+            if not provider_changes:
+                continue
+            providers[provider_name].update(provider_changes)
+        normalized = _normalize_runtime_config(next_cfg)
+        _persist_runtime_config(normalized)
+        _runtime_config = normalized
+        _health_probe_cache = None
+    return deepcopy(normalized)
+
+
 # ─── vault tools ──────────────────────────────────────────────────────────────
 
 def vault_read(path: str) -> str:
     full = VAULT_PATH / path.lstrip("/")
     if not full.exists():
         return f"[not found: {path}]"
+    if full.is_dir():
+        entries = sorted(p.name for p in full.iterdir())
+        if not entries:
+            return f"[directory empty: {path}]"
+        return "\n".join(f"{path.rstrip('/')}/{name}" for name in entries[:100])
     return full.read_text()
 
 
@@ -399,10 +596,12 @@ async def _health_probes() -> dict:
     if _health_probe_cache and now - _health_probe_cache[0] < _HEALTH_PROBE_TTL:
         return _health_probe_cache[1]
 
+    cfg = _config_copy()
+    providers = cfg["providers"]
     probe_jobs: dict[str, asyncio.Future] = {}
     provider_statuses: dict[str, str] = {}
 
-    if OPENROUTER_API_KEY and OPENROUTER_MODELS:
+    if providers["openrouter"]["enabled"] and OPENROUTER_API_KEY and providers["openrouter"]["models"]:
         probe_jobs["openrouter"] = asyncio.create_task(
             _probe_url(
                 f"{OPENROUTER_BASE}/models",
@@ -410,9 +609,9 @@ async def _health_probes() -> dict:
             )
         )
     else:
-        provider_statuses["openrouter"] = "disabled"
+        provider_statuses["openrouter"] = "disabled" if providers["openrouter"]["enabled"] else "muted"
 
-    if GEMINI_API_KEY:
+    if providers["gemini"]["enabled"] and GEMINI_API_KEY:
         probe_jobs["gemini"] = asyncio.create_task(
             _probe_url(
                 "https://generativelanguage.googleapis.com/v1beta/models",
@@ -421,9 +620,9 @@ async def _health_probes() -> dict:
             )
         )
     else:
-        provider_statuses["gemini"] = "disabled"
+        provider_statuses["gemini"] = "disabled" if providers["gemini"]["enabled"] else "muted"
 
-    if GROQ_API_KEY:
+    if providers["groq"]["enabled"] and GROQ_API_KEY:
         probe_jobs["groq"] = asyncio.create_task(
             _probe_url(
                 f"{GROQ_BASE}/models",
@@ -431,12 +630,12 @@ async def _health_probes() -> dict:
             )
         )
     else:
-        provider_statuses["groq"] = "disabled"
+        provider_statuses["groq"] = "disabled" if providers["groq"]["enabled"] else "muted"
 
-    if OLLAMA_URL:
-        probe_jobs["ollama"] = asyncio.create_task(_probe_url(f"{OLLAMA_URL}/api/tags", timeout=5.0))
+    if providers["ollama"]["enabled"] and providers["ollama"]["url"]:
+        probe_jobs["ollama"] = asyncio.create_task(_probe_url(f"{providers['ollama']['url']}/api/tags", timeout=5.0))
     else:
-        provider_statuses["ollama"] = "disabled"
+        provider_statuses["ollama"] = "disabled" if providers["ollama"]["enabled"] else "muted"
 
     worker_status = "disabled"
     if WORKER_URL:
@@ -454,7 +653,7 @@ async def _health_probes() -> dict:
             else:
                 provider_statuses[name] = result
 
-    enabled_statuses = [status for status in provider_statuses.values() if status != "disabled"]
+    enabled_statuses = [status for status in provider_statuses.values() if status not in {"disabled", "muted"}]
     backend_status = "ok" if any(status == "ok" for status in enabled_statuses) else (
         enabled_statuses[0] if enabled_statuses else "no providers configured"
     )
@@ -477,6 +676,11 @@ TOOLS_MAP = {
     "web_fetch": web_fetch,
     "kv_get": kv_get,
     "kv_set": kv_set,
+}
+
+WRITE_TOOL_NAMES = {"vault_write", "kv_set"}
+READ_ONLY_TOOLS_MAP = {
+    name: tool for name, tool in TOOLS_MAP.items() if name not in WRITE_TOOL_NAMES
 }
 
 TOOLS_SPEC = [
@@ -534,14 +738,47 @@ TOOLS_SPEC = [
     }},
 ]
 
+READ_ONLY_TOOLS_SPEC = [
+    spec for spec in TOOLS_SPEC if spec.get("function", {}).get("name") not in WRITE_TOOL_NAMES
+]
+
+
+def _tool_contract_for_mode(mode: Literal["chat", "think", "capture"]) -> tuple[dict[str, Callable], list[dict]]:
+    if mode == "capture":
+        return TOOLS_MAP, TOOLS_SPEC
+    return READ_ONLY_TOOLS_MAP, READ_ONLY_TOOLS_SPEC
+
+
+def _with_runtime_context(messages: list[dict], backend_used: str, model_used: str | None) -> list[dict]:
+    runtime_note = {
+        "role": "system",
+        "content": (
+            "Runtime context: this response is being generated by Overseer using "
+            f"backend '{backend_used}' and model '{model_used or backend_used}'. "
+            "If the user asks which model or backend is active, answer with this exact runtime context."
+        ),
+    }
+    if messages and messages[0].get("role") == "system":
+        return [messages[0], runtime_note, *messages[1:]]
+    return [runtime_note, *messages]
+
+
+def _summarize_local_node_error(exc: Exception) -> str:
+    detail = " ".join(str(exc).split()).strip()
+    if detail:
+        return f"local node unavailable: {detail[:160]}"
+    return f"local node unavailable: {type(exc).__name__}"
+
 
 # ─── backend-agnostic chat ────────────────────────────────────────────────────
 
-async def _gemini_chat(messages: list[dict]) -> dict:
+async def _gemini_chat(messages: list[dict], tools_spec: list[dict]) -> dict:
+    cfg = _config_copy()
+    model_name = cfg["providers"]["gemini"]["model"]
     payload = {
-        "model": GEMINI_MODEL,
-        "messages": messages,
-        "tools": TOOLS_SPEC,
+        "model": model_name,
+        "messages": _with_runtime_context(messages, "gemini", model_name),
+        "tools": tools_spec,
     }
     async with httpx.AsyncClient(timeout=60) as client:
         r = await client.post(
@@ -554,18 +791,25 @@ async def _gemini_chat(messages: list[dict]) -> dict:
                 raise RateLimitError(f"gemini {r.status_code}")
             raise RuntimeError(f"Gemini {r.status_code}: {r.text[:500]}")
         data = r.json()
-        token_ledger[GEMINI_MODEL] = token_ledger.get(GEMINI_MODEL, 0) + data.get("usage", {}).get("total_tokens", 0)
+        token_ledger[model_name] = token_ledger.get(model_name, 0) + data.get("usage", {}).get("total_tokens", 0)
         choice = data["choices"][0]["message"]
-        return {"content": choice.get("content") or "", "tool_calls": choice.get("tool_calls") or [], "_backend_used": "gemini"}
+        return {
+            "content": choice.get("content") or "",
+            "tool_calls": choice.get("tool_calls") or [],
+            "_backend_used": "gemini",
+            "_model_used": model_name,
+        }
 
 
-async def _groq_chat(messages: list[dict]) -> dict:
+async def _groq_chat(messages: list[dict], tools_spec: list[dict]) -> dict:
     # Do NOT set tool_choice — llama-3.3-70b-versatile (Hermes) generates XML
     # function call syntax when tool_choice is explicitly set, causing Groq 400.
+    cfg = _config_copy()
+    model_name = cfg["providers"]["groq"]["model"]
     payload = {
-        "model": GROQ_MODEL,
-        "messages": messages,
-        "tools": TOOLS_SPEC,
+        "model": model_name,
+        "messages": _with_runtime_context(messages, "groq", model_name),
+        "tools": tools_spec,
         "parallel_tool_calls": False,
     }
     async with httpx.AsyncClient(timeout=60) as client:
@@ -584,26 +828,36 @@ async def _groq_chat(messages: list[dict]) -> dict:
                 r2 = await client.post(
                     f"{GROQ_BASE}/chat/completions",
                     headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
-                    json={"model": GROQ_MODEL, "messages": messages},
+                    json={"model": model_name, "messages": messages},
                 )
                 if r2.is_success:
                     data2 = r2.json()
-                    token_ledger[GROQ_MODEL] = token_ledger.get(GROQ_MODEL, 0) + data2.get("usage", {}).get("total_tokens", 0)
-                    return {"content": data2["choices"][0]["message"].get("content") or "", "tool_calls": [], "_backend_used": "groq"}
+                    token_ledger[model_name] = token_ledger.get(model_name, 0) + data2.get("usage", {}).get("total_tokens", 0)
+                    return {
+                        "content": data2["choices"][0]["message"].get("content") or "",
+                        "tool_calls": [],
+                        "_backend_used": "groq",
+                        "_model_used": model_name,
+                    }
             raise RuntimeError(f"Groq {r.status_code}: {r.text[:500]}")
         data = r.json()
-        token_ledger[GROQ_MODEL] = token_ledger.get(GROQ_MODEL, 0) + data.get("usage", {}).get("total_tokens", 0)
+        token_ledger[model_name] = token_ledger.get(model_name, 0) + data.get("usage", {}).get("total_tokens", 0)
         choice = data["choices"][0]["message"]
-        return {"content": choice.get("content") or "", "tool_calls": choice.get("tool_calls") or [], "_backend_used": "groq"}
+        return {
+            "content": choice.get("content") or "",
+            "tool_calls": choice.get("tool_calls") or [],
+            "_backend_used": "groq",
+            "_model_used": model_name,
+        }
 
 
-async def _openrouter_chat(messages: list[dict], model: str = OPENROUTER_MODEL) -> dict:
+async def _openrouter_chat(messages: list[dict], model: str, tools_spec: list[dict] | None = None) -> dict:
     if not model.endswith(":free"):
         raise RuntimeError(f"OpenRouter model {model!r} is not a :free model — refusing to risk billing")
     payload = {
         "model": model,
-        "messages": messages,
-        "tools": TOOLS_SPEC,
+        "messages": _with_runtime_context(messages, f"or:{model.split('/')[-1].replace(':free', '')}", model),
+        "tools": tools_spec or TOOLS_SPEC,
     }
     async with httpx.AsyncClient(timeout=60) as client:
         r = await client.post(
@@ -624,29 +878,50 @@ async def _openrouter_chat(messages: list[dict], model: str = OPENROUTER_MODEL) 
         token_ledger[model] = token_ledger.get(model, 0) + data.get("usage", {}).get("total_tokens", 0)
         choice = data["choices"][0]["message"]
         slot_name = f"or:{model.split('/')[-1].replace(':free', '')}"
-        return {"content": choice.get("content") or "", "tool_calls": choice.get("tool_calls") or [], "_backend_used": slot_name}
+        return {
+            "content": choice.get("content") or "",
+            "tool_calls": choice.get("tool_calls") or [],
+            "_backend_used": slot_name,
+            "_model_used": model,
+        }
 
 
-async def _ollama_chat(messages: list[dict]) -> dict:
-    payload = {"model": OLLAMA_MODEL, "messages": messages, "tools": TOOLS_SPEC, "stream": False}
+async def _ollama_chat(messages: list[dict], tools_spec: list[dict]) -> dict:
+    cfg = _config_copy()
+    ollama_cfg = cfg["providers"]["ollama"]
+    payload = {
+        "model": ollama_cfg["model"],
+        "messages": _with_runtime_context(messages, "ollama", ollama_cfg["model"]),
+        "tools": tools_spec,
+        "stream": False,
+    }
     async with httpx.AsyncClient(timeout=120) as client:
-        r = await client.post(f"{OLLAMA_URL}/api/chat", json=payload)
+        r = await client.post(f"{ollama_cfg['url']}/api/chat", json=payload)
         r.raise_for_status()
         data = r.json()
         msg = data.get("message", {})
-        return {"content": msg.get("content") or "", "tool_calls": msg.get("tool_calls") or [], "_backend_used": "ollama"}
+        return {
+            "content": msg.get("content") or "",
+            "tool_calls": msg.get("tool_calls") or [],
+            "_backend_used": "ollama",
+            "_model_used": ollama_cfg["model"],
+        }
 
 
-async def _remote_node_chat(messages: list[dict]) -> dict:
+async def _remote_node_chat(messages: list[dict], tools_spec: list[dict]) -> dict:
     nodes = [node for node in _trusted_nodes() if "chat" in node.capabilities]
     if not nodes:
         raise RuntimeError("no trusted local nodes available")
     node = nodes[0]
+    model_used = node.models[0] if node.models else None
     async with httpx.AsyncClient(timeout=120) as client:
         r = await client.post(
             f"{node.inference_url.rstrip('/')}/infer/chat",
             headers={"X-Overseer-Node-Secret": OVERSEER_NODE_SECRET, "Content-Type": "application/json"},
-            json={"messages": messages, "tools": TOOLS_SPEC},
+            json={
+                "messages": _with_runtime_context(messages, f"node:{node.node_id}", model_used),
+                "tools": tools_spec,
+            },
         )
         r.raise_for_status()
         data = r.json()
@@ -654,14 +929,17 @@ async def _remote_node_chat(messages: list[dict]) -> dict:
             "content": data.get("content") or "",
             "tool_calls": data.get("tool_calls") or [],
             "_backend_used": f"node:{node.node_id}",
+            "_model_used": data.get("backend") or model_used,
         }
 
 
 def _build_rotator() -> ProviderRotator:
+    cfg = _config_copy()
+    providers = cfg["providers"]
     slots: list[_Slot] = []
     # OpenRouter gets first slots (most free-model variety, 3600s TTL per model)
-    if OPENROUTER_API_KEY and OPENROUTER_MODELS:
-        for or_model in OPENROUTER_MODELS:
+    if providers["openrouter"]["enabled"] and OPENROUTER_API_KEY and providers["openrouter"]["models"]:
+        for or_model in providers["openrouter"]["models"]:
             short = or_model.split("/")[-1].replace(":free", "")
             slots.append(_Slot(
                 name=f"or:{short}",
@@ -669,13 +947,13 @@ def _build_rotator() -> ProviderRotator:
                 reset_ttl=3600,
             ))
     # Gemini (1M tokens/day, ~1h reset window)
-    if GEMINI_API_KEY:
+    if providers["gemini"]["enabled"] and GEMINI_API_KEY:
         slots.append(_Slot(name="gemini", call=_gemini_chat, reset_ttl=3600))
     # Groq (100k tokens/day, ~8h reset window)
-    if GROQ_API_KEY:
+    if providers["groq"]["enabled"] and GROQ_API_KEY:
         slots.append(_Slot(name="groq", call=_groq_chat, reset_ttl=28800))
     # Ollama (local, retry fast — 60s in case of transient error)
-    if OLLAMA_URL:
+    if providers["ollama"]["enabled"] and providers["ollama"]["url"]:
         slots.append(_Slot(name="ollama", call=_ollama_chat, reset_ttl=60))
     return ProviderRotator(slots)
 
@@ -683,27 +961,39 @@ def _build_rotator() -> ProviderRotator:
 _rotator = _build_rotator()
 
 
-async def llm_chat(messages: list[dict]) -> dict:
-    fallback_reason: str | None = None
-    # Debug pin: if OVERSEER_BACKEND is set to a specific provider, skip rotation.
-    if OVERSEER_BACKEND not in ("auto", ""):
-        if OVERSEER_BACKEND == "node":
-            return await _remote_node_chat(messages)
-        if OVERSEER_BACKEND == "ollama":
-            return await _ollama_chat(messages)
-        if OVERSEER_BACKEND == "groq":
-            return await _groq_chat(messages)
-        if OVERSEER_BACKEND == "openrouter":
-            return await _openrouter_chat(messages)
-        if OVERSEER_BACKEND == "gemini":
-            return await _gemini_chat(messages)
+def _rebuild_rotator() -> None:
+    global _rotator
+    blocked_by_slot = {slot.name: slot.blocked_until for slot in (_rotator._slots if _rotator else [])}
+    next_rotator = _build_rotator()
+    for slot in next_rotator._slots:
+        slot.blocked_until = blocked_by_slot.get(slot.name, 0.0)
+    _rotator = next_rotator
 
-    if OVERSEER_PREFER_LOCAL_NODES and OVERSEER_NODE_SECRET:
+
+async def llm_chat(messages: list[dict], mode: Literal["chat", "think", "capture"] = "chat") -> dict:
+    fallback_reason: str | None = None
+    _, tools_spec = _tool_contract_for_mode(mode)
+    cfg = _config_copy()
+    backend_choice = cfg["backend"]
+    # Debug pin: if OVERSEER_BACKEND is set to a specific provider, skip rotation.
+    if backend_choice not in ("auto", ""):
+        if backend_choice == "node":
+            return await _remote_node_chat(messages, tools_spec)
+        if backend_choice == "ollama":
+            return await _ollama_chat(messages, tools_spec)
+        if backend_choice == "groq":
+            return await _groq_chat(messages, tools_spec)
+        if backend_choice == "openrouter":
+            return await _openrouter_chat(messages, model=cfg["providers"]["openrouter"]["model"], tools_spec=tools_spec)
+        if backend_choice == "gemini":
+            return await _gemini_chat(messages, tools_spec)
+
+    if cfg["prefer_local_nodes"] and OVERSEER_NODE_SECRET:
         try:
-            return await _remote_node_chat(messages)
+            return await _remote_node_chat(messages, tools_spec)
         except Exception as exc:
             logging.warning("overseer: local node fallback triggered: %s", exc)
-            fallback_reason = f"local node unavailable: {type(exc).__name__}"
+            fallback_reason = _summarize_local_node_error(exc)
 
     # Rotation: try each slot in round-robin order, skip blocked ones.
     n = len(_rotator._slots)
@@ -717,7 +1007,10 @@ async def llm_chat(messages: list[dict]) -> dict:
                 "_backend_used": "none",
             }
         try:
-            result = await slot.call(messages)
+            if slot.name.startswith("or:"):
+                result = await slot.call(messages, tools_spec=tools_spec)
+            else:
+                result = await slot.call(messages, tools_spec)
             result.setdefault("_backend_used", slot.name)
             if fallback_reason:
                 result.setdefault("_fallback_reason", fallback_reason)
@@ -729,19 +1022,25 @@ async def llm_chat(messages: list[dict]) -> dict:
     return {"content": "No providers available.", "tool_calls": [], "_backend_used": "none", "_fallback_reason": fallback_reason}
 
 
-async def run_tool_loop(messages: list[dict]) -> tuple[str, list[str], str, str | None]:
+async def run_tool_loop(
+    messages: list[dict],
+    mode: Literal["chat", "think", "capture"] = "chat",
+) -> tuple[str, list[str], str, str | None, str | None]:
     tool_log: list[str] = []
     backend_used = "rotator"
     fallback_reason: str | None = None
+    model_used: str | None = None
+    tool_map, _ = _tool_contract_for_mode(mode)
     for _ in range(10):
-        response = await llm_chat(messages)
+        response = await llm_chat(messages, mode=mode)
         content = response["content"]
         tool_calls = response["tool_calls"]
         backend_used = response.get("_backend_used", "rotator")
         fallback_reason = response.get("_fallback_reason")
+        model_used = response.get("_model_used")
 
         if not tool_calls:
-            return content, tool_log, backend_used, fallback_reason
+            return content, tool_log, backend_used, fallback_reason, model_used
 
         # Groq format: tool_calls is list of {id, type, function: {name, arguments}}
         # Ollama format: list of {function: {name, arguments}}
@@ -756,8 +1055,8 @@ async def run_tool_loop(messages: list[dict]) -> tuple[str, list[str], str, str 
             short_args = ", ".join(f"{k}={repr(v)[:40]}" for k, v in args.items())
             tool_log.append(f"{name}({short_args})")
 
-            tool_fn = TOOLS_MAP.get(name)
-            result = tool_fn(**args) if tool_fn else f"[unknown tool: {name}]"
+            tool_fn = tool_map.get(name)
+            result = tool_fn(**args) if tool_fn else f"[tool unavailable in {mode} mode: {name}]"
 
             # Groq needs tool_call_id in the tool response
             tool_msg: dict = {"role": "tool", "content": str(result)[:8000]}
@@ -765,18 +1064,20 @@ async def run_tool_loop(messages: list[dict]) -> tuple[str, list[str], str, str 
                 tool_msg["tool_call_id"] = tc["id"]
             messages.append(tool_msg)
 
-    return "Max tool iterations reached.", tool_log, backend_used, fallback_reason
+    return "Max tool iterations reached.", tool_log, backend_used, fallback_reason, model_used
 
 
 # ─── log ──────────────────────────────────────────────────────────────────────
 
-def update_log(status: str, tool_calls: list[str] | None = None) -> None:
+def update_log(status: str, tool_calls: list[str] | None = None, *, persist: bool = True) -> None:
+    if not persist:
+        return
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     if _rotator:
         active, blocked = _rotator.status()
         backend_label = f"rotator ({len(active)} active, {len(blocked)} blocked)"
     else:
-        backend_label = OVERSEER_BACKEND
+        backend_label = _config_copy()["backend"]
     tool_lines = "\n".join(f"- `{t}`" for t in (tool_calls or [])[-10:]) or "*no calls*"
     content = f"---\ntags: [overseer, log]\n---\n\n# Overseer Log\n\n- **{now}** — {backend_label}\n- {status}\n\n## Last calls\n\n{tool_lines}\n"
     log_path = VAULT_PATH / "memory" / "overseer-live.md"
@@ -789,7 +1090,7 @@ def update_log(status: str, tool_calls: list[str] | None = None) -> None:
 
 # ─── system prompt ────────────────────────────────────────────────────────────
 
-def _build_system_prompt() -> str:
+def _build_system_prompt(mode: Literal["chat", "think", "capture"]) -> str:
     FACTS_CAP = 2000
     facts_buf = ""
     facts_dir = VAULT_PATH / "memory" / "facts"
@@ -814,17 +1115,23 @@ def _build_system_prompt() -> str:
                 first_line = sf.read_text().splitlines()[0].lstrip("#").strip()
                 skills_index += f"\n- {d.name}: {first_line}"
 
-    return f"""You are Overseer. You route raw data into the vault and retrieve it on demand. You have tools to read, write, and search the vault.
+    mode_block = {
+        "chat": """CURRENT MODE: CHAT
+- Help the user understand, recall, and discuss.
+- You may read, search, and fetch context.
+- You may NOT write to the vault, update memory, or claim you saved anything.
+- If the user asks to save something, tell them to switch to capture mode.""",
+        "think": """CURRENT MODE: THINK
+- This is private reasoning and planning mode.
+- Help the user think, compare options, and clarify goals.
+- You may read, search, and fetch context.
+- You may NOT write to the vault, update memory, or claim you saved anything.""",
+        "capture": """CURRENT MODE: CAPTURE
+- This mode may write durable data when appropriate.
+- Storing data: do it silently, confirm in one line: what was stored and where.""",
+    }[mode]
 
-RULES:
-- Casual greetings, check-ins, or questions about yourself ("are you working?", "what can you do?"): respond briefly and naturally in 1-2 sentences. Do not search the vault.
-- Storing data: do it silently, confirm in one line: what was stored and where.
-- Answering factual questions about stored data: search the vault first. Return exactly what you find. If nothing found: "[not in vault: <query>]".
-- Never invent or infer facts. Only state what is in the vault.
-- Responses are one or two sentences unless more is explicitly requested.
-- If an event is missing a date, ask exactly one question to get it.
-- No filler phrases. No "I've noted that". No "Certainly!".
-
+    routing_block = "" if mode != "capture" else """
 NO DRIFT — every write must keep the vault consistent:
 - Person fact: write to memory/facts/people.md AND wiki/personal/people/NAME.md
 - System change: write to memory/facts/ AND wiki/systems/NAME.md
@@ -846,6 +1153,20 @@ ROUTING — when raw data arrives, route it:
 - Article or website mentioned: wiki/personal/articles.md — append row
 - New knowledge domain (not in vault after vault_search): wiki/knowledge/{{slug}}.md (create stub, tag [EMERGING])
 - Anything notable and recurring that doesn't fit above (habit, language practice, workout, game, tool, goal milestone, health metric): wiki/personal/tracking/{{category-slug}}.md — create page if missing, append row
+"""
+
+    return f"""You are Overseer. You help the user work with the vault. You have tools to read, search, and sometimes write depending on mode.
+
+RULES:
+- Casual greetings, check-ins, or questions about yourself ("are you working?", "what can you do?"): respond briefly and naturally in 1-2 sentences. Do not search the vault.
+- Answering factual questions about stored data: search the vault first. Return exactly what you find. If nothing found: "[not in vault: <query>]".
+- Never invent or infer facts. Only state what is in the vault.
+- Responses are one or two sentences unless more is explicitly requested.
+- If an event is missing a date, ask exactly one question to get it.
+- No filler phrases. No "I've noted that". No "Certainly!".
+
+{mode_block}
+{routing_block}
 
 SKILLS — before performing a complex task, read the relevant skill file first:
 {skills_index or "(no skills loaded)"}
@@ -856,13 +1177,14 @@ Current facts:
 Today: {datetime.now(ZoneInfo(USER_TIMEZONE)).strftime("%Y-%m-%d, %A, %H:%M %Z")}"""
 
 
-def system_prompt() -> str:
+def system_prompt(mode: Literal["chat", "think", "capture"] = "chat") -> str:
     global _system_prompt_cache
     now = time.monotonic()
-    if _system_prompt_cache and now - _system_prompt_cache[0] < _SYSTEM_PROMPT_TTL:
-        return _system_prompt_cache[1]
-    prompt = _build_system_prompt()
-    _system_prompt_cache = (now, prompt)
+    cached = _system_prompt_cache.get(mode)
+    if cached and now - cached[0] < _SYSTEM_PROMPT_TTL:
+        return cached[1]
+    prompt = _build_system_prompt(mode)
+    _system_prompt_cache[mode] = (now, prompt)
     return prompt
 
 
@@ -1148,9 +1470,69 @@ Text: {text}"""
 
 # ─── request models ───────────────────────────────────────────────────────────
 
+
+def _model_dump(model: BaseModel) -> dict:
+    if hasattr(model, "model_dump"):
+        return model.model_dump(exclude_unset=True)
+    return model.dict(exclude_unset=True)
+
+
+async def _provider_payload(cfg: dict | None = None, probes: dict | None = None) -> dict:
+    config = deepcopy(cfg or _config_copy())
+    probe_data = probes or await _health_probes()
+    provider_statuses = probe_data.get("provider_statuses", {})
+    ollama_url = config["providers"]["ollama"]["url"]
+    ollama_models = await _ollama_models(ollama_url) if ollama_url else []
+    trusted_nodes = [node.public_dict() for node in _trusted_nodes()]
+    node_models = sorted({model for node in trusted_nodes for model in node.get("models", []) if model})
+
+    providers = config["providers"]
+    return {
+        "config_path": str(RUNTIME_CONFIG_PATH),
+        "backend": config["backend"],
+        "available_backends": _available_backend_names(config),
+        "prefer_local_nodes": config["prefer_local_nodes"],
+        "providers": {
+            "gemini": {
+                "enabled": providers["gemini"]["enabled"],
+                "configured": bool(GEMINI_API_KEY),
+                "model": providers["gemini"]["model"],
+                "status": provider_statuses.get("gemini", "disabled"),
+            },
+            "groq": {
+                "enabled": providers["groq"]["enabled"],
+                "configured": bool(GROQ_API_KEY),
+                "model": providers["groq"]["model"],
+                "status": provider_statuses.get("groq", "disabled"),
+            },
+            "openrouter": {
+                "enabled": providers["openrouter"]["enabled"],
+                "configured": bool(OPENROUTER_API_KEY),
+                "model": providers["openrouter"]["model"],
+                "models": providers["openrouter"]["models"],
+                "status": provider_statuses.get("openrouter", "disabled"),
+            },
+            "ollama": {
+                "enabled": providers["ollama"]["enabled"],
+                "configured": bool(ollama_url),
+                "url": ollama_url,
+                "model": providers["ollama"]["model"],
+                "available_models": ollama_models,
+                "status": provider_statuses.get("ollama", "disabled"),
+            },
+        },
+        "worker": {
+            "configured": bool(WORKER_URL),
+            "status": probe_data.get("worker_status", "disabled"),
+        },
+        "trusted_node_count": len(trusted_nodes),
+        "trusted_node_models": node_models,
+    }
+
 class ChatRequest(BaseModel):
     message: str
     thread_id: str | None = None
+    mode: Literal["chat", "think", "capture"] = "chat"
 
 
 class TriageRequest(BaseModel):
@@ -1166,6 +1548,22 @@ class RememberRequest(BaseModel):
 class ExtractRequest(BaseModel):
     text: str
     session_id: str | None = None
+    mode: Literal["chat", "think", "capture"] = "chat"
+
+
+class ProviderConfigPatch(BaseModel):
+    backend: str | None = None
+    prefer_local_nodes: bool | None = None
+    gemini_enabled: bool | None = None
+    gemini_model: str | None = None
+    groq_enabled: bool | None = None
+    groq_model: str | None = None
+    openrouter_enabled: bool | None = None
+    openrouter_model: str | None = None
+    openrouter_models: list[str] | None = None
+    ollama_enabled: bool | None = None
+    ollama_url: str | None = None
+    ollama_model: str | None = None
 
 
 class ProcessRawRequest(BaseModel):
@@ -1230,6 +1628,7 @@ async def status(_: None = Depends(_auth)):
 @app.get("/health")
 async def health():
     probes = await _health_probes()
+    cfg = _config_copy()
 
     vault_sync = ""
     try:
@@ -1245,7 +1644,7 @@ async def health():
     trusted_nodes = [node.public_dict() for node in _trusted_nodes()]
 
     return {
-        "backend": "rotator" if OVERSEER_BACKEND in ("auto", "") else OVERSEER_BACKEND,
+        "backend": "rotator" if cfg["backend"] in ("auto", "") else cfg["backend"],
         "active_slots": active_slots,
         "blocked_slots": blocked_slots,
         "backend_status": probes["backend_status"],
@@ -1254,6 +1653,23 @@ async def health():
         "vault_path": str(VAULT_PATH),
         "vault_last_sync": vault_sync,
         "token_ledger": token_ledger,
+        "config_path": str(RUNTIME_CONFIG_PATH),
+        "available_backends": _available_backend_names(cfg),
+        "prefer_local_nodes": cfg["prefer_local_nodes"],
+        "provider_config": {
+            "gemini": {"enabled": cfg["providers"]["gemini"]["enabled"], "model": cfg["providers"]["gemini"]["model"]},
+            "groq": {"enabled": cfg["providers"]["groq"]["enabled"], "model": cfg["providers"]["groq"]["model"]},
+            "openrouter": {
+                "enabled": cfg["providers"]["openrouter"]["enabled"],
+                "model": cfg["providers"]["openrouter"]["model"],
+                "models": cfg["providers"]["openrouter"]["models"],
+            },
+            "ollama": {
+                "enabled": cfg["providers"]["ollama"]["enabled"],
+                "url": cfg["providers"]["ollama"]["url"],
+                "model": cfg["providers"]["ollama"]["model"],
+            },
+        },
         "node_registry_enabled": bool(OVERSEER_NODE_SECRET),
         "allowed_node_ids": sorted(OVERSEER_ALLOWED_NODE_IDS),
         "trusted_nodes": trusted_nodes,
@@ -1270,7 +1686,63 @@ async def ready():
     }
 
 
-def flush_token_ledger() -> None:
+@app.get("/providers")
+async def get_providers(_: None = Depends(_auth)):
+    probes = await _health_probes()
+    return await _provider_payload(probes=probes)
+
+
+@app.patch("/providers")
+async def patch_providers(req: ProviderConfigPatch, _: None = Depends(_auth)):
+    changes = _model_dump(req)
+    if not changes:
+        probes = await _health_probes()
+        return await _provider_payload(probes=probes)
+
+    patch = {"providers": {}}
+    if "backend" in changes:
+        backend = _clean_text(changes["backend"], "auto")
+        if backend not in VALID_BACKENDS:
+            raise HTTPException(status_code=400, detail=f"invalid backend: {backend}")
+        patch["backend"] = backend
+    if "prefer_local_nodes" in changes:
+        patch["prefer_local_nodes"] = changes["prefer_local_nodes"]
+    if "gemini_enabled" in changes:
+        patch["providers"].setdefault("gemini", {})["enabled"] = changes["gemini_enabled"]
+    if "gemini_model" in changes:
+        patch["providers"].setdefault("gemini", {})["model"] = changes["gemini_model"]
+    if "groq_enabled" in changes:
+        patch["providers"].setdefault("groq", {})["enabled"] = changes["groq_enabled"]
+    if "groq_model" in changes:
+        patch["providers"].setdefault("groq", {})["model"] = changes["groq_model"]
+    if "openrouter_enabled" in changes:
+        patch["providers"].setdefault("openrouter", {})["enabled"] = changes["openrouter_enabled"]
+    if "openrouter_model" in changes:
+        model_name = _clean_text(changes["openrouter_model"])
+        if model_name and not model_name.endswith(":free"):
+            raise HTTPException(status_code=400, detail="openrouter_model must end with :free")
+        patch["providers"].setdefault("openrouter", {})["model"] = model_name
+    if "openrouter_models" in changes:
+        model_list = _parse_model_list(changes["openrouter_models"], require_free=True)
+        if changes["openrouter_models"] and not model_list:
+            raise HTTPException(status_code=400, detail="openrouter_models must contain at least one :free model")
+        patch["providers"].setdefault("openrouter", {})["models"] = model_list
+    if "ollama_enabled" in changes:
+        patch["providers"].setdefault("ollama", {})["enabled"] = changes["ollama_enabled"]
+    if "ollama_url" in changes:
+        patch["providers"].setdefault("ollama", {})["url"] = changes["ollama_url"]
+    if "ollama_model" in changes:
+        patch["providers"].setdefault("ollama", {})["model"] = changes["ollama_model"]
+
+    updated_cfg = _update_runtime_config(patch)
+    _rebuild_rotator()
+    probes = await _health_probes()
+    return await _provider_payload(cfg=updated_cfg, probes=probes)
+
+
+def flush_token_ledger(*, persist: bool = True) -> None:
+    if not persist:
+        return
     usage_path = VAULT_PATH / "memory" / "usage.md"
     try:
         usage_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1285,29 +1757,43 @@ def flush_token_ledger() -> None:
 @app.post("/chat")
 async def chat(req: ChatRequest, _: None = Depends(_auth)):
     try:
-        update_log(f"Processing: {req.message[:80]}...")
+        persist = req.mode == "capture"
+        update_log(f"Processing: {req.message[:80]}...", persist=persist)
         messages = [
-            {"role": "system", "content": system_prompt()},
+            {"role": "system", "content": system_prompt(req.mode)},
             {"role": "user", "content": req.message},
         ]
-        answer, tool_log, backend_used, fallback_reason = await run_tool_loop(messages)
-        flush_token_ledger()
-        update_log(f"Done: {req.message[:60]}", tool_log)
+        answer, tool_log, backend_used, fallback_reason, model_used = await run_tool_loop(messages, mode=req.mode)
+        flush_token_ledger(persist=persist)
+        update_log(f"Done: {req.message[:60]}", tool_log, persist=persist)
         return {
             "response": answer,
             "tool_calls": tool_log,
             "backend": "rotator",
             "backend_used": backend_used,
+            "model_used": model_used,
+            "mode": req.mode,
             "fallback_reason": fallback_reason,
             "extracted": None,
         }
     except Exception as e:
         import traceback
-        return {"response": None, "error": str(e), "trace": traceback.format_exc()[-1000:], "backend": "rotator", "backend_used": "none", "fallback_reason": None}
+        return {
+            "response": None,
+            "error": str(e),
+            "trace": traceback.format_exc()[-1000:],
+            "backend": "rotator",
+            "backend_used": "none",
+            "model_used": None,
+            "mode": req.mode,
+            "fallback_reason": None,
+        }
 
 
 @app.post("/extract")
 async def extract(req: ExtractRequest, _: None = Depends(_auth)):
+    if req.mode != "capture":
+        raise HTTPException(status_code=403, detail="extract requires capture mode")
     result = await extract_entities(req.text)
     return result
 
@@ -1447,11 +1933,11 @@ Session:
 
 After processing, confirm what you stored and where (one line each)."""
 
-        messages = [{"role": "system", "content": system_prompt()},
+        messages = [{"role": "system", "content": system_prompt("capture")},
                     {"role": "user", "content": session_prompt}]
 
         try:
-            response_text, tool_log, backend, _ = await run_tool_loop(messages)
+            response_text, tool_log, backend, _, _ = await run_tool_loop(messages, mode="capture")
         except Exception as e:
             results.append(f"ERROR {session_file.name}: {e}")
             continue

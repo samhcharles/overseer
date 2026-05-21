@@ -20,6 +20,7 @@ services:
       - "${OVERSEER_BIND_HOST:-127.0.0.1}:8765:8765"
     volumes:
       - vault_data:/vault
+      - config_data:/config
     networks:
       - coolify
       - internal
@@ -79,6 +80,7 @@ services:
 
 volumes:
   vault_data:
+  config_data:
 
 networks:
   coolify:
