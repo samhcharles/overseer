@@ -1,0 +1,23 @@
+[Unit]
+Description=Overseer trusted local node runner
+After=network-online.target ollama.service
+Wants=network-online.target ollama.service
+
+[Service]
+Type=notify
+NotifyAccess=main
+WatchdogSec=90
+WorkingDirectory=%h/dev/personal/overseer
+ExecStart=%h/dev/personal/overseer/.venv/bin/python %h/dev/personal/overseer/scripts/overseer-node-runner.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+EnvironmentFile=-%h/.secrets/master.env
+Environment=OVERSEER_NODE_BIND=0.0.0.0
+Environment=OVERSEER_NODE_PORT=18765
+Environment=OLLAMA_MODEL=llama3.2:3b
+
+[Install]
+WantedBy=default.target

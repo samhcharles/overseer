@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch vault inbox/yap for new yap files
+
+[Path]
+PathModified=%h/vault/inbox/yap
+Unit=yap_processor.service
+
+[Install]
+WantedBy=default.target
