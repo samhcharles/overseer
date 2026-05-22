@@ -1884,4 +1884,11 @@ if (arg) {
   process.exit(0);
 }
 
+// Request kitty keyboard protocol — lets the terminal send distinct bytes for
+// Shift+Enter, Ctrl+Enter etc. Terminals that don't support it ignore this.
+if (process.stdout.isTTY) {
+  process.stdout.write("\x1b[>1u");
+  process.on("exit", () => process.stdout.write("\x1b[<u"));
+}
+
 render(<App />, { exitOnCtrlC: false });
