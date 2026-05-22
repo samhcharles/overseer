@@ -18,67 +18,59 @@ const PUPIL = "#0c0c0c";  // pupil
 const WHITE = "#ffffff";  // sclera (solid block fill)
 const GLINT = "#f0f0f0";  // pupil glint
 
-// Row layout: 18 chars wide, almond shape
-// Row 0: "   ╭──────────╮   "  (3+1+10+1+3 = 18)
-// Row 1: " ╭─╯" + "██████████" + "╰─╮ "  (4+10+4 = 18)
-// Row 2: " │" + "██" + "╭────────╮" + "██" + "│ "  (2+2+10+2+2 = 18)
-// Row 3: " │" + "██" + "│" + [8 inner] + "│" + "██" + "│ "  (2+2+1+8+1+2+2 = 18)
-//   inner center: "  " + "█▌██" + "  "  (2+4+2 = 8)
-//   inner left:   "█▌██" + "    "       (4+4 = 8)
-//   inner right:  "    " + "█▌██"       (4+4 = 8)
-// Row 4: mirror of row 2 (LD2 sides)
-// Row 5: mirror of row 1 (LD2 sides)
-// Row 6: "   ╰──────────╯   "  (LD2)
+// 18 chars wide, 7 rows. Iris uses ▄/▀ half-blocks for a rounded shape
+// instead of box-drawing characters. Pupil row: IRIS edge + IRISF fill + PUPIL + GLINT + PUPIL + IRISF fill + IRIS edge.
+// Sclera: ██ in WHITE each side. Blink: lids meet at row 3, iris sliver visible in squint.
 
 const EYE_FRAMES = [
-  // 0: OPEN_CENTER — eyeball white only flanks iris; lid body stays dark
+  // 0: OPEN_CENTER
   [
     [{ text: "   ╭──────────╮   ", color: LID }],
     [{ text: " ╭─╯          ╰─╮ ", color: LID }],
-    [{ text: " │", color: LID }, { text: "██", color: WHITE }, { text: "╭────────╮", color: IRIS }, { text: "██", color: WHITE }, { text: "│ ", color: LID }],
-    [{ text: " │", color: LID }, { text: "██", color: WHITE }, { text: "│", color: IRIS }, { text: "  ", color: IRISF }, { text: "█", color: PUPIL }, { text: "▌", color: GLINT }, { text: "██", color: PUPIL }, { text: "  ", color: IRISF }, { text: "│", color: IRIS }, { text: "██", color: WHITE }, { text: "│ ", color: LID }],
-    [{ text: " │", color: LID }, { text: "██", color: WHITE }, { text: "╰────────╯", color: IRIS }, { text: "██", color: WHITE }, { text: "│ ", color: LD2 }],
+    [{ text: " │", color: LID }, { text: "██", color: WHITE }, { text: "▄", color: IRIS }, { text: "████████", color: IRISF }, { text: "▄", color: IRIS }, { text: "██", color: WHITE }, { text: "│ ", color: LID }],
+    [{ text: " │", color: LID }, { text: "██", color: WHITE }, { text: "█", color: IRIS }, { text: "██", color: IRISF }, { text: "█", color: PUPIL }, { text: "▌", color: GLINT }, { text: "██", color: PUPIL }, { text: "██", color: IRISF }, { text: "█", color: IRIS }, { text: "██", color: WHITE }, { text: "│ ", color: LID }],
+    [{ text: " │", color: LID }, { text: "██", color: WHITE }, { text: "▀", color: IRIS }, { text: "████████", color: IRISF }, { text: "▀", color: IRIS }, { text: "██", color: WHITE }, { text: "│ ", color: LD2 }],
     [{ text: " ╰─╮          ╭─╯ ", color: LD2 }],
     [{ text: "   ╰──────────╯   ", color: LD2 }],
   ],
-  // 1: OPEN_LEFT
+  // 1: OPEN_LEFT — pupil at left edge of iris
   [
     [{ text: "   ╭──────────╮   ", color: LID }],
     [{ text: " ╭─╯          ╰─╮ ", color: LID }],
-    [{ text: " │", color: LID }, { text: "██", color: WHITE }, { text: "╭────────╮", color: IRIS }, { text: "██", color: WHITE }, { text: "│ ", color: LID }],
-    [{ text: " │", color: LID }, { text: "██", color: WHITE }, { text: "│", color: IRIS }, { text: "█", color: PUPIL }, { text: "▌", color: GLINT }, { text: "██", color: PUPIL }, { text: "    ", color: IRISF }, { text: "│", color: IRIS }, { text: "██", color: WHITE }, { text: "│ ", color: LID }],
-    [{ text: " │", color: LID }, { text: "██", color: WHITE }, { text: "╰────────╯", color: IRIS }, { text: "██", color: WHITE }, { text: "│ ", color: LD2 }],
+    [{ text: " │", color: LID }, { text: "██", color: WHITE }, { text: "▄", color: IRIS }, { text: "████████", color: IRISF }, { text: "▄", color: IRIS }, { text: "██", color: WHITE }, { text: "│ ", color: LID }],
+    [{ text: " │", color: LID }, { text: "██", color: WHITE }, { text: "█", color: IRIS }, { text: "█", color: PUPIL }, { text: "▌", color: GLINT }, { text: "██", color: PUPIL }, { text: "████", color: IRISF }, { text: "█", color: IRIS }, { text: "██", color: WHITE }, { text: "│ ", color: LID }],
+    [{ text: " │", color: LID }, { text: "██", color: WHITE }, { text: "▀", color: IRIS }, { text: "████████", color: IRISF }, { text: "▀", color: IRIS }, { text: "██", color: WHITE }, { text: "│ ", color: LD2 }],
     [{ text: " ╰─╮          ╭─╯ ", color: LD2 }],
     [{ text: "   ╰──────────╯   ", color: LD2 }],
   ],
-  // 2: OPEN_RIGHT
+  // 2: OPEN_RIGHT — pupil at right edge of iris
   [
     [{ text: "   ╭──────────╮   ", color: LID }],
     [{ text: " ╭─╯          ╰─╮ ", color: LID }],
-    [{ text: " │", color: LID }, { text: "██", color: WHITE }, { text: "╭────────╮", color: IRIS }, { text: "██", color: WHITE }, { text: "│ ", color: LID }],
-    [{ text: " │", color: LID }, { text: "██", color: WHITE }, { text: "│", color: IRIS }, { text: "    ", color: IRISF }, { text: "█", color: PUPIL }, { text: "▌", color: GLINT }, { text: "██", color: PUPIL }, { text: "│", color: IRIS }, { text: "██", color: WHITE }, { text: "│ ", color: LID }],
-    [{ text: " │", color: LID }, { text: "██", color: WHITE }, { text: "╰────────╯", color: IRIS }, { text: "██", color: WHITE }, { text: "│ ", color: LD2 }],
+    [{ text: " │", color: LID }, { text: "██", color: WHITE }, { text: "▄", color: IRIS }, { text: "████████", color: IRISF }, { text: "▄", color: IRIS }, { text: "██", color: WHITE }, { text: "│ ", color: LID }],
+    [{ text: " │", color: LID }, { text: "██", color: WHITE }, { text: "█", color: IRIS }, { text: "████", color: IRISF }, { text: "█", color: PUPIL }, { text: "▌", color: GLINT }, { text: "██", color: PUPIL }, { text: "█", color: IRIS }, { text: "██", color: WHITE }, { text: "│ ", color: LID }],
+    [{ text: " │", color: LID }, { text: "██", color: WHITE }, { text: "▀", color: IRIS }, { text: "████████", color: IRISF }, { text: "▀", color: IRIS }, { text: "██", color: WHITE }, { text: "│ ", color: LD2 }],
     [{ text: " ╰─╮          ╭─╯ ", color: LD2 }],
     [{ text: "   ╰──────────╯   ", color: LD2 }],
   ],
-  // 3: SQUINT — no sclera, lid closing
+  // 3: SQUINT — lids close, thin iris sliver remains
   [
     [{ text: "   ╭──────────╮   ", color: LID }],
     [{ text: " ╭─╯          ╰─╮ ", color: LID }],
-    [{ text: " ╰──", color: LID }, { text: "──────────", color: LID }, { text: "──╯ ", color: LID }],
-    [{ text: "    ", color: LID }, { text: "──────────", color: IRIS }, { text: "    ", color: LID }],
-    [{ text: " ╭──", color: LD2 }, { text: "──────────", color: LD2 }, { text: "──╮ ", color: LD2 }],
+    [{ text: " ╰──────────────╯ ", color: LID }],
+    [{ text: "    ──────────    ", color: IRIS }],
+    [{ text: " ╭──────────────╮ ", color: LD2 }],
     [{ text: " ╰─╮          ╭─╯ ", color: LD2 }],
     [{ text: "   ╰──────────╯   ", color: LD2 }],
   ],
-  // 4: CLOSED
+  // 4: CLOSED — lids fully shut
   [
     [{ text: "   ╭──────────╮   ", color: LID }],
-    [{ text: " ╭─╯", color: LID }, { text: "          ", color: LID }, { text: "╰─╮ ", color: LID }],
-    [{ text: " ╰──", color: LID }, { text: "──────────", color: LID }, { text: "──╯ ", color: LID }],
-    [{ text: "    ", color: LD2 }, { text: "──────────", color: LD2 }, { text: "    ", color: LD2 }],
-    [{ text: " ╭──", color: LD2 }, { text: "──────────", color: LD2 }, { text: "──╮ ", color: LD2 }],
-    [{ text: " ╰─╮", color: LD2 }, { text: "          ", color: LD2 }, { text: "╭─╯ ", color: LD2 }],
+    [{ text: " ╭─╯          ╰─╮ ", color: LID }],
+    [{ text: " ╰──────────────╯ ", color: LID }],
+    [{ text: "    ──────────    ", color: LD2 }],
+    [{ text: " ╭──────────────╮ ", color: LD2 }],
+    [{ text: " ╰─╮          ╭─╯ ", color: LD2 }],
     [{ text: "   ╰──────────╯   ", color: LD2 }],
   ],
 ];
