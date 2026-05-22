@@ -12,66 +12,67 @@ const WIDE_LAYOUT_MIN = 104;
 // ── Eye color constants ────────────────────────────────────────────────────────
 const LID   = "#c07030";  // upper eyelid
 const LD2   = "#7d3a08";  // lower eyelid / shadow
-const IRIS  = "#a85020";  // iris ring outline
-const IRISF = "#8a3018";  // iris fill (between ring and pupil)
-const PUPIL = "#0c0c0c";  // pupil
-const WHITE = "#ffffff";  // sclera (solid block fill)
-const GLINT = "#f0f0f0";  // pupil glint
+const IRIS  = "#b06030";  // iris ring
+const IRISF = "#6b2008";  // iris fill (dark inner)
+const PUPIL = "#080808";  // pupil
+const GLINT = "#f0e8d0";  // pupil glint
 
-// 18 chars wide, 7 rows. Iris uses ▄/▀ half-blocks for a rounded shape
-// instead of box-drawing characters. Pupil row: IRIS edge + IRISF fill + PUPIL + GLINT + PUPIL + IRISF fill + IRIS edge.
-// Sclera: ██ in WHITE each side. Blink: lids meet at row 3, iris sliver visible in squint.
+// 22 chars wide, 7 rows. No sclera — iris floats in darkness inside the lids.
+// Half-block ▄/▀ on iris top/bottom rows create a round profile.
+// Pupil row: IRIS edge · IRISF fill · PUPIL · GLINT half-block · PUPIL · IRISF fill · IRIS edge.
+// Squint: lids meet at row 2/4, row 3 shows a thin iris sliver in IRIS color.
+// Closed: same structure, row 3 in LD2 (no iris visible, just the crease).
 
 const EYE_FRAMES = [
   // 0: OPEN_CENTER
   [
-    [{ text: "   ╭──────────╮   ", color: LID }],
-    [{ text: " ╭─╯          ╰─╮ ", color: LID }],
-    [{ text: " │", color: LID }, { text: "██", color: WHITE }, { text: "▄", color: IRIS }, { text: "████████", color: IRISF }, { text: "▄", color: IRIS }, { text: "██", color: WHITE }, { text: "│ ", color: LID }],
-    [{ text: " │", color: LID }, { text: "██", color: WHITE }, { text: "█", color: IRIS }, { text: "██", color: IRISF }, { text: "█", color: PUPIL }, { text: "▌", color: GLINT }, { text: "██", color: PUPIL }, { text: "██", color: IRISF }, { text: "█", color: IRIS }, { text: "██", color: WHITE }, { text: "│ ", color: LID }],
-    [{ text: " │", color: LID }, { text: "██", color: WHITE }, { text: "▀", color: IRIS }, { text: "████████", color: IRISF }, { text: "▀", color: IRIS }, { text: "██", color: WHITE }, { text: "│ ", color: LD2 }],
-    [{ text: " ╰─╮          ╭─╯ ", color: LD2 }],
-    [{ text: "   ╰──────────╯   ", color: LD2 }],
+    [{ text: "   ╭──────────────╮   ", color: LID }],
+    [{ text: " ╭─╯              ╰─╮ ", color: LID }],
+    [{ text: " │", color: LID }, { text: "    ", color: LID }, { text: "▄", color: IRIS }, { text: "████████", color: IRISF }, { text: "▄", color: IRIS }, { text: "    ", color: LID }, { text: "│ ", color: LID }],
+    [{ text: " │", color: LID }, { text: "    ", color: LID }, { text: "█", color: IRIS }, { text: "██", color: IRISF }, { text: "█", color: PUPIL }, { text: "▌", color: GLINT }, { text: "██", color: PUPIL }, { text: "██", color: IRISF }, { text: "█", color: IRIS }, { text: "    ", color: LID }, { text: "│ ", color: LID }],
+    [{ text: " │", color: LID }, { text: "    ", color: LID }, { text: "▀", color: IRIS }, { text: "████████", color: IRISF }, { text: "▀", color: IRIS }, { text: "    ", color: LID }, { text: "│ ", color: LD2 }],
+    [{ text: " ╰─╮              ╭─╯ ", color: LD2 }],
+    [{ text: "   ╰──────────────╯   ", color: LD2 }],
   ],
-  // 1: OPEN_LEFT — pupil at left edge of iris
+  // 1: OPEN_LEFT — pupil drifts left
   [
-    [{ text: "   ╭──────────╮   ", color: LID }],
-    [{ text: " ╭─╯          ╰─╮ ", color: LID }],
-    [{ text: " │", color: LID }, { text: "██", color: WHITE }, { text: "▄", color: IRIS }, { text: "████████", color: IRISF }, { text: "▄", color: IRIS }, { text: "██", color: WHITE }, { text: "│ ", color: LID }],
-    [{ text: " │", color: LID }, { text: "██", color: WHITE }, { text: "█", color: IRIS }, { text: "█", color: PUPIL }, { text: "▌", color: GLINT }, { text: "██", color: PUPIL }, { text: "████", color: IRISF }, { text: "█", color: IRIS }, { text: "██", color: WHITE }, { text: "│ ", color: LID }],
-    [{ text: " │", color: LID }, { text: "██", color: WHITE }, { text: "▀", color: IRIS }, { text: "████████", color: IRISF }, { text: "▀", color: IRIS }, { text: "██", color: WHITE }, { text: "│ ", color: LD2 }],
-    [{ text: " ╰─╮          ╭─╯ ", color: LD2 }],
-    [{ text: "   ╰──────────╯   ", color: LD2 }],
+    [{ text: "   ╭──────────────╮   ", color: LID }],
+    [{ text: " ╭─╯              ╰─╮ ", color: LID }],
+    [{ text: " │", color: LID }, { text: "    ", color: LID }, { text: "▄", color: IRIS }, { text: "████████", color: IRISF }, { text: "▄", color: IRIS }, { text: "    ", color: LID }, { text: "│ ", color: LID }],
+    [{ text: " │", color: LID }, { text: "    ", color: LID }, { text: "█", color: IRIS }, { text: "█", color: PUPIL }, { text: "▌", color: GLINT }, { text: "██", color: PUPIL }, { text: "████", color: IRISF }, { text: "█", color: IRIS }, { text: "    ", color: LID }, { text: "│ ", color: LID }],
+    [{ text: " │", color: LID }, { text: "    ", color: LID }, { text: "▀", color: IRIS }, { text: "████████", color: IRISF }, { text: "▀", color: IRIS }, { text: "    ", color: LID }, { text: "│ ", color: LD2 }],
+    [{ text: " ╰─╮              ╭─╯ ", color: LD2 }],
+    [{ text: "   ╰──────────────╯   ", color: LD2 }],
   ],
-  // 2: OPEN_RIGHT — pupil at right edge of iris
+  // 2: OPEN_RIGHT — pupil drifts right
   [
-    [{ text: "   ╭──────────╮   ", color: LID }],
-    [{ text: " ╭─╯          ╰─╮ ", color: LID }],
-    [{ text: " │", color: LID }, { text: "██", color: WHITE }, { text: "▄", color: IRIS }, { text: "████████", color: IRISF }, { text: "▄", color: IRIS }, { text: "██", color: WHITE }, { text: "│ ", color: LID }],
-    [{ text: " │", color: LID }, { text: "██", color: WHITE }, { text: "█", color: IRIS }, { text: "████", color: IRISF }, { text: "█", color: PUPIL }, { text: "▌", color: GLINT }, { text: "██", color: PUPIL }, { text: "█", color: IRIS }, { text: "██", color: WHITE }, { text: "│ ", color: LID }],
-    [{ text: " │", color: LID }, { text: "██", color: WHITE }, { text: "▀", color: IRIS }, { text: "████████", color: IRISF }, { text: "▀", color: IRIS }, { text: "██", color: WHITE }, { text: "│ ", color: LD2 }],
-    [{ text: " ╰─╮          ╭─╯ ", color: LD2 }],
-    [{ text: "   ╰──────────╯   ", color: LD2 }],
+    [{ text: "   ╭──────────────╮   ", color: LID }],
+    [{ text: " ╭─╯              ╰─╮ ", color: LID }],
+    [{ text: " │", color: LID }, { text: "    ", color: LID }, { text: "▄", color: IRIS }, { text: "████████", color: IRISF }, { text: "▄", color: IRIS }, { text: "    ", color: LID }, { text: "│ ", color: LID }],
+    [{ text: " │", color: LID }, { text: "    ", color: LID }, { text: "█", color: IRIS }, { text: "████", color: IRISF }, { text: "█", color: PUPIL }, { text: "▌", color: GLINT }, { text: "██", color: PUPIL }, { text: "█", color: IRIS }, { text: "    ", color: LID }, { text: "│ ", color: LID }],
+    [{ text: " │", color: LID }, { text: "    ", color: LID }, { text: "▀", color: IRIS }, { text: "████████", color: IRISF }, { text: "▀", color: IRIS }, { text: "    ", color: LID }, { text: "│ ", color: LD2 }],
+    [{ text: " ╰─╮              ╭─╯ ", color: LD2 }],
+    [{ text: "   ╰──────────────╯   ", color: LD2 }],
   ],
-  // 3: SQUINT — lids close, thin iris sliver remains
+  // 3: SQUINT — lids close, thin iris sliver at center
   [
-    [{ text: "   ╭──────────╮   ", color: LID }],
-    [{ text: " ╭─╯          ╰─╮ ", color: LID }],
-    [{ text: " ╰──────────────╯ ", color: LID }],
-    [{ text: "    ──────────    ", color: IRIS }],
-    [{ text: " ╭──────────────╮ ", color: LD2 }],
-    [{ text: " ╰─╮          ╭─╯ ", color: LD2 }],
-    [{ text: "   ╰──────────╯   ", color: LD2 }],
+    [{ text: "   ╭──────────────╮   ", color: LID }],
+    [{ text: " ╭─╯              ╰─╮ ", color: LID }],
+    [{ text: " ╰──────────────────╯ ", color: LID }],
+    [{ text: "    ──────────────    ", color: IRIS }],
+    [{ text: " ╭──────────────────╮ ", color: LD2 }],
+    [{ text: " ╰─╮              ╭─╯ ", color: LD2 }],
+    [{ text: "   ╰──────────────╯   ", color: LD2 }],
   ],
-  // 4: CLOSED — lids fully shut
+  // 4: CLOSED — lids fully shut, just the crease
   [
-    [{ text: "   ╭──────────╮   ", color: LID }],
-    [{ text: " ╭─╯          ╰─╮ ", color: LID }],
-    [{ text: " ╰──────────────╯ ", color: LID }],
-    [{ text: "    ──────────    ", color: LD2 }],
-    [{ text: " ╭──────────────╮ ", color: LD2 }],
-    [{ text: " ╰─╮          ╭─╯ ", color: LD2 }],
-    [{ text: "   ╰──────────╯   ", color: LD2 }],
+    [{ text: "   ╭──────────────╮   ", color: LID }],
+    [{ text: " ╭─╯              ╰─╮ ", color: LID }],
+    [{ text: " ╰──────────────────╯ ", color: LID }],
+    [{ text: "    ──────────────    ", color: LD2 }],
+    [{ text: " ╭──────────────────╮ ", color: LD2 }],
+    [{ text: " ╰─╮              ╭─╯ ", color: LD2 }],
+    [{ text: "   ╰──────────────╯   ", color: LD2 }],
   ],
 ];
 
