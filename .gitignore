@@ -2,6 +2,14 @@ __pycache__/
 *.pyc
 .env
 
+# Agent context files — never commit
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+
+# Python virtualenv
+.venv/
+
 # TUI build artifacts
 tui/dist/
 tui/node_modules/

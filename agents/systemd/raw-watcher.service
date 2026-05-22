@@ -1,12 +1,13 @@
 [Unit]
 Description=Overseer raw session watcher
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
 WorkingDirectory=%h/dev/personal/overseer/scripts
 ExecStart=/bin/bash %h/dev/personal/overseer/scripts/raw-watcher.sh
-Restart=on-failure
+Restart=always
 RestartSec=15
 
 EnvironmentFile=-%h/.secrets/master.env

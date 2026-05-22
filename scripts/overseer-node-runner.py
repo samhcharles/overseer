@@ -12,6 +12,7 @@ import asyncio
 import ipaddress
 import logging
 import os
+import socket as _socket
 import subprocess
 from contextlib import suppress
 
@@ -21,7 +22,7 @@ from pydantic import BaseModel
 import uvicorn
 
 
-GATEWAY_URL = os.environ.get("OVERSEER_GATEWAY_URL", "").rstrip("/")
+GATEWAY_URL = os.environ.get("OVERSEER_GATEWAY_URL", os.environ.get("OVERSEER_API_URL", "")).rstrip("/")
 NODE_SECRET = os.environ.get("OVERSEER_NODE_SECRET", "")
 NODE_ID = os.environ.get("OVERSEER_NODE_ID") or os.environ.get("HOSTNAME", "overseer-node")
 NODE_HOSTNAME = os.environ.get("OVERSEER_NODE_HOSTNAME") or os.environ.get("HOSTNAME", NODE_ID)
@@ -34,6 +35,18 @@ HEARTBEAT_INTERVAL = int(os.environ.get("OVERSEER_NODE_HEARTBEAT_INTERVAL", "30"
 
 app = FastAPI(title="Overseer Node Runner", version="1.0.0")
 logging.basicConfig(level=logging.INFO)
+
+
+def _sd_notify(state: str) -> None:
+    """Send a notification to systemd via NOTIFY_SOCKET (sd_notify protocol)."""
+    sock_path = os.environ.get("NOTIFY_SOCKET", "")
+    if not sock_path:
+        return
+    with suppress(Exception):
+        with _socket.socket(_socket.AF_UNIX, _socket.SOCK_DGRAM) as sock:
+            addr = "\0" + sock_path[1:] if sock_path.startswith("@") else sock_path
+            sock.connect(addr)
+            sock.sendall(state.encode())
 
 
 class InferChatRequest(BaseModel):
@@ -132,14 +145,18 @@ async def _heartbeat_loop() -> None:
                     },
                 )
                 response.raise_for_status()
+            _sd_notify("WATCHDOG=1")
         except Exception as exc:
             logging.warning("overseer-node: heartbeat failed: %s", exc)
+            with suppress(Exception):
+                await _register()
         await asyncio.sleep(HEARTBEAT_INTERVAL)
 
 
 @app.on_event("startup")
 async def startup() -> None:
     await _register()
+    _sd_notify("READY=1")
     if GATEWAY_URL and NODE_SECRET:
         asyncio.create_task(_heartbeat_loop())
 

@@ -11,6 +11,8 @@ from pathlib import Path
 
 import httpx
 
+from vault_utils import vault_write_atomic
+
 VAULT_PATH = Path(os.environ.get("VAULT_PATH", Path.home() / "vault"))
 OVERSEER_API_URL = os.environ.get("OVERSEER_API_URL", "")
 
@@ -81,7 +83,7 @@ def add_backlinks(note_path: Path, orphans: list[str]) -> None:
         links = " ".join(f"[[{o}]]" for o in orphans)
         new_content = content.rstrip() + f"\n\n## Related\n\n{links}\n"
 
-    note_path.write_text(new_content)
+    vault_write_atomic(note_path, new_content)
     vault_commit(note_path, f"linker: add backlinks to {note_path.stem}")
     print(f"[linker] {note_path.stem} ← {orphans}")
 

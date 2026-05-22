@@ -45,13 +45,38 @@ async function resolveApiUrl(signal) {
   return health.api_url;
 }
 
+function withApiMetadata(data, apiUrl) {
+  return { ...data, api_url: apiUrl, api_urls: API_URLS, api_source: API_SOURCE };
+}
+
+async function requestResolvedApi(path, { signal, apiUrlOverride, method = "GET", body, errorPrefix = "unable to reach Overseer" } = {}) {
+  const apiUrl = apiUrlOverride || await resolveApiUrl(signal);
+  try {
+    const data = await requestJson(path, {
+      method,
+      body,
+      signal,
+      baseUrl: apiUrl,
+    });
+    resolvedApiUrl = apiUrl;
+    return withApiMetadata(data, apiUrl);
+  } catch (error) {
+    if (error?.name !== "AbortError") resolvedApiUrl = null;
+    throw buildApiError(
+      `${errorPrefix} at ${apiUrl}: ${describeError(error)}`,
+      [{ url: apiUrl, error: describeError(error) }],
+      error,
+    );
+  }
+}
+
 export async function fetchHealth(signal) {
   const attempts = [];
   for (const apiUrl of API_URLS) {
     try {
       const data = await requestJson("/health", { signal, baseUrl: apiUrl });
       resolvedApiUrl = apiUrl;
-      return { ...data, api_url: apiUrl, api_urls: API_URLS, api_source: API_SOURCE };
+      return withApiMetadata(data, apiUrl);
     } catch (error) {
       attempts.push({ url: apiUrl, error: describeError(error) });
     }
@@ -60,32 +85,39 @@ export async function fetchHealth(signal) {
 }
 
 async function sendJson(path, body, signal, apiUrlOverride) {
-  const apiUrl = apiUrlOverride || await resolveApiUrl(signal);
-  try {
-    const data = await requestJson(path, {
-      method: "POST",
-      body,
-      signal,
-      baseUrl: apiUrl,
-    });
-    resolvedApiUrl = apiUrl;
-    return { ...data, api_url: apiUrl, api_urls: API_URLS, api_source: API_SOURCE };
-  } catch (error) {
-    if (error?.name !== "AbortError") resolvedApiUrl = null;
-    throw buildApiError(
-      `unable to reach Overseer at ${apiUrl}: ${describeError(error)}`,
-      [{ url: apiUrl, error: describeError(error) }],
-      error,
-    );
-  }
+  return requestResolvedApi(path, {
+    method: "POST",
+    body,
+    signal,
+    apiUrlOverride,
+    errorPrefix: "unable to reach Overseer",
+  });
 }
 
-export async function sendChat(message, signal, apiUrlOverride) {
-  return sendJson("/chat", { message }, signal, apiUrlOverride);
+export async function sendChat(message, mode, signal, apiUrlOverride) {
+  return sendJson("/chat", { message, mode }, signal, apiUrlOverride);
 }
 
-export async function extractText(text, sessionId, signal, apiUrlOverride) {
-  return sendJson("/extract", { text, session_id: sessionId }, signal, apiUrlOverride);
+export async function extractText(text, sessionId, mode, signal, apiUrlOverride) {
+  return sendJson("/extract", { text, session_id: sessionId, mode }, signal, apiUrlOverride);
+}
+
+export async function fetchProviders(signal, apiUrlOverride) {
+  return requestResolvedApi("/providers", {
+    signal,
+    apiUrlOverride,
+    errorPrefix: "unable to reach Overseer providers",
+  });
+}
+
+export async function updateProviders(patch, signal, apiUrlOverride) {
+  return requestResolvedApi("/providers", {
+    method: "PATCH",
+    body: patch,
+    signal,
+    apiUrlOverride,
+    errorPrefix: "unable to update Overseer providers",
+  });
 }
 
 export function getApiRuntime() {

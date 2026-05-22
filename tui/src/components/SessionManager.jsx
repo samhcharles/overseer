@@ -88,86 +88,82 @@ export function SessionManager({ initialSessions, onOpen, onNew, onBack, activeS
   });
 
   return (
-    <Box flexDirection="column" paddingX={3} paddingTop={1}>
-      {/* Header */}
-      <Box marginBottom={1}>
-        <Text color="#555" bold>SESSIONS  </Text>
-        <Text color="#2a2a2a">{sessions.length}</Text>
-        {activeSessionId && (
-          <Text color="#1e1e1e">  {" · q to go back"}</Text>
-        )}
-      </Box>
+    <Box flexDirection="column" paddingX={1} paddingTop={1}>
+      <Box borderStyle="round" borderColor="#444" paddingX={1} paddingY={0} flexDirection="column">
+        <Box marginBottom={1}>
+          <Text color="#888" bold>SESSIONS</Text>
+          <Text color="#666">{`  ${sessions.length}`}</Text>
+          {activeSessionId ? <Text color="#666">{"  · q back"}</Text> : null}
+        </Box>
 
-      {/* Column headers */}
-      <Box>
-        <Text color="#1e1e1e">{"   "}</Text>
-        <Text color="#1e1e1e">{"title".padEnd(42)}</Text>
-        <Text color="#1e1e1e">{"msgs".padStart(6)}</Text>
-        <Text color="#1e1e1e">{"tokens".padStart(8)}</Text>
-        <Text color="#1e1e1e">{"chars".padStart(8)}</Text>
-        <Text color="#1e1e1e">{"  last active"}</Text>
-      </Box>
-      <Text color="#1e1e1e">{"─".repeat(80)}</Text>
+        <Box>
+          <Text color="#555">{"   "}</Text>
+          <Text color="#555">{"title".padEnd(42)}</Text>
+          <Text color="#555">{"msgs".padStart(6)}</Text>
+          <Text color="#555">{"tokens".padStart(8)}</Text>
+          <Text color="#555">{"chars".padStart(8)}</Text>
+          <Text color="#555">{"  last active"}</Text>
+        </Box>
+        <Text color="#333">{"─".repeat(80)}</Text>
 
-      {/* Session rows */}
-      {sessions.length === 0 && (
-        <Text color="#333">  no sessions yet</Text>
-      )}
+        {sessions.length === 0 ? (
+          <Text color="#666">no sessions yet</Text>
+        ) : null}
 
-      {sessions.map((s, i) => {
-        const isSelected = i === cursor;
-        const isActive = s.id === activeSessionId;
-        const isDeleting = isSelected && mode === "delete-confirm";
-        const isRenaming = isSelected && mode === "rename";
+        {sessions.map((s, i) => {
+          const isSelected = i === cursor;
+          const isActive = s.id === activeSessionId;
+          const isDeleting = isSelected && mode === "delete-confirm";
+          const isRenaming = isSelected && mode === "rename";
 
-        const titleColor = isDeleting ? "#7a2020" : isSelected ? "#e0e0e0" : "#383838";
-        const dimColor = isDeleting ? "#5a1010" : isSelected ? "#555" : "#222";
-        const prefix = isSelected ? "↳ " : isActive ? "● " : "  ";
-        const prefixColor = isSelected ? "#e06c00" : isActive ? "#555" : "#1a1a1a";
+          const titleColor = isDeleting ? "#ff9b9b" : isSelected ? "#ffffff" : "#cfcfcf";
+          const dimColor = isDeleting ? "#c55a5a" : isSelected ? "#888" : "#666";
+          const prefix = isSelected ? "↳ " : isActive ? "● " : "  ";
+          const prefixColor = isSelected ? "#e06c00" : isActive ? "#3a7a63" : "#444";
 
-        let titleDisplay;
-        if (isRenaming) {
-          titleDisplay = (
-            <Box>
-              <Text color="#d0d0d0">{renameValue}</Text>
-              <Text color="#e06c00">{"▌"}</Text>
-              <Text color="#1e1e1e">{" ".repeat(Math.max(0, 40 - renameValue.length - 2))}</Text>
+          let titleDisplay;
+          if (isRenaming) {
+            titleDisplay = (
+              <Box>
+                <Text color="#ffffff">{renameValue}</Text>
+                <Text color="#e06c00">{"▌"}</Text>
+                <Text color="#333">{" ".repeat(Math.max(0, 40 - renameValue.length - 2))}</Text>
+              </Box>
+            );
+          } else {
+            titleDisplay = (
+              <Text color={titleColor}>{truncate(s.title, 40).padEnd(40)}</Text>
+            );
+          }
+
+          return (
+            <Box key={s.id}>
+              <Text color={prefixColor}>{prefix}</Text>
+              {titleDisplay}
+              <Text color={dimColor}>{String(s.stats.messageCount).padStart(6)}</Text>
+              <Text color={dimColor}>{fmtTokens(s.stats.estimatedTokens).padStart(8)}</Text>
+              <Text color="#777">{String(s.stats.totalChars).padStart(8)}</Text>
+              <Text color="#666">{"  " + fmtDate(s.updated_at)}</Text>
             </Box>
           );
-        } else {
-          titleDisplay = (
-            <Text color={titleColor}>{truncate(s.title, 40).padEnd(40)}</Text>
-          );
-        }
+        })}
 
-        return (
-          <Box key={s.id}>
-            <Text color={prefixColor}>{prefix}</Text>
-            {titleDisplay}
-            <Text color={dimColor}>{String(s.stats.messageCount).padStart(6)}</Text>
-            <Text color={dimColor}>{fmtTokens(s.stats.estimatedTokens).padStart(8)}</Text>
-            <Text color={isSelected ? "#333" : "#1e1e1e"}>{String(s.stats.totalChars).padStart(8)}</Text>
-            <Text color={isSelected ? "#333" : "#1a1a1a"}>{"  " + fmtDate(s.updated_at)}</Text>
-          </Box>
-        );
-      })}
+        <Text color="#333">{"─".repeat(80)}</Text>
 
-      <Text color="#1e1e1e">{"─".repeat(80)}</Text>
-
-      {/* Help bar */}
-      <Box marginTop={1}>
-        {mode === "browse" && (
-          <Text color="#2a2a2a">
-            {"  j/k navigate   r rename   d delete   n new session   Enter open"}
-            {onBack ? "   q back" : ""}
-          </Text>
-        )}
-        {mode === "rename" && (
-          <Text color="#555">{"  rename — Enter confirm   Escape cancel"}</Text>
-        )}
-        {mode === "delete-confirm" && (
-          <Text color="#7a2020">{"  delete \"" + truncate(selected?.title, 30) + "\"?  y / n"}</Text>
-        )}
+        <Box marginTop={1}>
+          {mode === "browse" ? (
+            <Text color="#666">
+              {"j/k navigate   r rename   d delete   n new session   Enter open"}
+              {onBack ? "   q back" : ""}
+            </Text>
+          ) : null}
+          {mode === "rename" ? (
+            <Text color="#888">{"rename · Enter confirm   Escape cancel"}</Text>
+          ) : null}
+          {mode === "delete-confirm" ? (
+            <Text color="#ff9b9b">{`delete "${truncate(selected?.title, 30)}"?  y / n`}</Text>
+          ) : null}
+        </Box>
       </Box>
     </Box>
   );

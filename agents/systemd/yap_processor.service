@@ -3,14 +3,9 @@ Description=Brain Yap Processor Agent
 After=network.target
 
 [Service]
-Type=simple
+Type=oneshot
 WorkingDirectory=%h/dev/personal/overseer/agents
-ExecStart=/usr/bin/python3 %h/dev/personal/overseer/agents/yap_processor.py
-Restart=on-failure
-RestartSec=15
+ExecStart=/usr/bin/python3 %h/dev/personal/overseer/agents/yap_processor.py --scan
 
 EnvironmentFile=-%h/.secrets/master.env
 Environment=VAULT_PATH=%h/vault
-
-[Install]
-WantedBy=default.target

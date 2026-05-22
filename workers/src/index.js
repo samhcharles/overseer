@@ -1,12 +1,14 @@
 /**
  * Overseer Worker — Cloudflare edge tools for Overseer.
  *
+ * Overseer calls this worker as a tool. This worker does NOT call back to Overseer.
+ *
  * Routes (all require Authorization: Bearer $WORKER_SECRET):
  *   GET  /fetch?url=...          — fetch URL, return {url, status, content}
  *   GET  /kv/get?key=...         — read from Workers KV
  *   POST /kv/set                 — write to Workers KV  {key, value, ttl?}
- *   POST /webhook/:source        — forward to VPS /extract
- *   Cron trigger                 — daily digest → VPS /chat
+ *   POST /webhook/:source        — store payload in KV as pending:webhook:{source}:{ts}
+ *   Cron trigger                 — write pending:cron:{date} to KV for Overseer to pick up
  */
 
 function unauthorized() {
@@ -36,14 +38,13 @@ async function handleFetch(request, env) {
 
   try {
     const r = await fetch(url, {
-      headers: { "User-Agent": "Overseer/1.0 (+https://github.com/samhcharles/overseer)" },
+      headers: { "User-Agent": "Overseer/1.0" },
       redirect: "follow",
       cf: { cacheEverything: false },
     });
     const contentType = r.headers.get("content-type") || "";
     let content = await r.text();
 
-    // Strip HTML tags for cleaner content
     if (contentType.includes("text/html")) {
       content = content
         .replace(/<script[\s\S]*?<\/script>/gi, "")
@@ -88,12 +89,7 @@ async function handleKvSet(request, env) {
 }
 
 // ── /webhook/:source ──────────────────────────────────────────────────────────
-
-function overseerHeaders(env) {
-  const h = { "Content-Type": "application/json" };
-  if (env.OVERSEER_API_KEY) h["Authorization"] = `Bearer ${env.OVERSEER_API_KEY}`;
-  return h;
-}
+// Store incoming payload in KV for Overseer to pull when it's ready.
 
 async function handleWebhook(request, env, source) {
   let body;
@@ -103,51 +99,32 @@ async function handleWebhook(request, env, source) {
     body = "";
   }
 
-  const overseerUrl = env.OVERSEER_API_URL || "https://overseer.wokspec.org";
   let text = body;
-
   try {
     const parsed = JSON.parse(body);
     if (source === "github" && parsed.commits) {
       const msgs = parsed.commits.map((c) => `${c.id.slice(0, 7)} ${c.message}`).join("\n");
-      text = `GitHub push to ${parsed.repository?.name}: \n${msgs}`;
+      text = `GitHub push to ${parsed.repository?.name}:\n${msgs}`;
     } else if (parsed.text) {
       text = parsed.text;
     }
   } catch {}
 
-  try {
-    const r = await fetch(`${overseerUrl}/extract`, {
-      method: "POST",
-      headers: overseerHeaders(env),
-      body: JSON.stringify({ text, session_id: `webhook-${source}` }),
-    });
-    const result = await r.json();
-    return json({ source, forwarded: true, vault_writes: result.vault_writes ?? [] });
-  } catch (e) {
-    return json({ source, forwarded: false, error: e.message }, 502);
-  }
+  const ts = Date.now();
+  const key = `pending:webhook:${source}:${ts}`;
+  await env.OVERSEER_KV.put(key, text, { expirationTtl: 86400 });
+
+  return json({ source, queued: true, key });
 }
 
 // ── cron ──────────────────────────────────────────────────────────────────────
+// Write a pending digest marker to KV. Overseer polls for it on next run.
 
 async function handleCron(env) {
-  const overseerUrl = env.OVERSEER_API_URL || "https://overseer.wokspec.org";
-  const now = new Date().toLocaleString("en-US", { timeZone: "America/Los_Angeles" });
-  const prompt = `Daily digest — ${now}. Check my vault for anything overdue, upcoming, or worth surfacing today. Keep it under 5 bullets.`;
-
-  try {
-    const r = await fetch(`${overseerUrl}/chat`, {
-      method: "POST",
-      headers: overseerHeaders(env),
-      body: JSON.stringify({ message: prompt }),
-    });
-    const result = await r.json();
-    console.log("Cron digest:", result.response?.slice(0, 200));
-    return result;
-  } catch (e) {
-    console.error("Cron failed:", e.message);
-  }
+  const date = new Date().toISOString().slice(0, 10);
+  const key = `pending:cron:${date}`;
+  await env.OVERSEER_KV.put(key, date, { expirationTtl: 86400 });
+  console.log("Cron: queued digest for", date);
 }
 
 // ── router ────────────────────────────────────────────────────────────────────

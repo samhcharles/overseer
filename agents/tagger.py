@@ -8,16 +8,16 @@ import json
 import os
 import subprocess
 import sys
-import time
 from datetime import datetime
 from pathlib import Path
 
 import httpx
 
+from vault_utils import vault_write_atomic
+
 VAULT_PATH = Path(os.environ.get("VAULT_PATH", Path.home() / "vault"))
 OVERSEER_API_URL = os.environ.get("OVERSEER_API_URL", "")
 OVERSEER_API_KEY = os.environ.get("OVERSEER_API_KEY", "")
-POLL_INTERVAL = int(os.environ.get("TAGGER_POLL_INTERVAL", "30"))
 SEEN_FILE = Path.home() / ".local" / "state" / "brain-agents" / "tagger-seen.json"
 
 
@@ -92,8 +92,8 @@ def process_file(path: Path) -> None:
 
     entry_lines.append("")
 
-    with wiki_file.open("a") as f:
-        f.write("\n".join(entry_lines) + "\n")
+    existing = wiki_file.read_text() if wiki_file.exists() else ""
+    vault_write_atomic(wiki_file, existing + "\n".join(entry_lines) + "\n")
 
     vault_commit(wiki_file, f"tagger: digest {source} → {dest}")
 
@@ -102,12 +102,13 @@ def process_file(path: Path) -> None:
         person_file = VAULT_PATH / "wiki" / "personal" / "people" / f"{person}.md"
         if not person_file.exists():
             today_str = datetime.now().strftime("%Y-%m-%d")
-            person_file.write_text(
+            vault_write_atomic(
+                person_file,
                 f"---\ntitle: {person}\npartition: personal\ntype: person\n"
                 f"name: {person}\nrelationship: \nbirthday: \n"
                 f"tags: [people, personal]\nsources: [synthesized]\n"
                 f"created: {today_str}\nupdated: {today_str}\n---\n\n"
-                f"# {person}\n\nPart of [[personal/MOC|Personal]].\n\n## Facts\n\n## Notes\n"
+                f"# {person}\n\nPart of [[personal/MOC|Personal]].\n\n## Facts\n\n## Notes\n",
             )
             vault_commit(person_file, f"tagger: new person note — {person}")
 
@@ -139,13 +140,12 @@ def main() -> None:
         print("[tagger] OVERSEER_API_URL not set — triage disabled, exiting", file=sys.stderr)
         sys.exit(1)
 
-    print(f"[tagger] watching {VAULT_PATH}/inbox/ every {POLL_INTERVAL}s")
-    while True:
-        try:
-            scan_inbox()
-        except Exception as e:
-            print(f"[tagger] scan error: {e}", file=sys.stderr)
-        time.sleep(POLL_INTERVAL)
+    print(f"[tagger] scanning {VAULT_PATH}/inbox/")
+    try:
+        scan_inbox()
+    except Exception as e:
+        print(f"[tagger] scan error: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

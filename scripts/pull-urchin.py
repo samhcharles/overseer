@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-pull-urchin.py — pull recent events from the local Urchin journal into vault.
+pull-urchin.py: pull recent events from the local Urchin journal into vault.
 
 Run from WSL where Urchin is running on 127.0.0.1:18799.
 
@@ -15,6 +15,7 @@ import json
 import os
 import sys
 import subprocess
+import tempfile
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -118,14 +119,14 @@ def format_entry(event: dict) -> str:
 def section_heading(kind: str, ym_str: str) -> str:
     month = datetime.strptime(ym_str, "%Y-%m").strftime("%B %Y")
     headings = {
-        "health_metric":  f"# Health — {month}",
-        "purchase":       f"# Purchases — {month}",
-        "calendar_event": f"# Calendar — {month}",
-        "location":       f"# Location — {month}",
-        "search_query":   f"# Search — {month}",
-        "watch_history":  f"# Watch History — {month}",
+        "health_metric":  f"# Health: {month}",
+        "purchase":       f"# Purchases: {month}",
+        "calendar_event": f"# Calendar: {month}",
+        "location":       f"# Location: {month}",
+        "search_query":   f"# Search: {month}",
+        "watch_history":  f"# Watch History: {month}",
     }
-    return headings.get(kind, f"# Dev Activity — {month}")
+    return headings.get(kind, f"# Dev Activity: {month}")
 
 
 def write_events_to_vault(events: list[dict], dry_run: bool) -> dict[str, int]:
@@ -159,8 +160,19 @@ def write_events_to_vault(events: list[dict], dry_run: bool) -> dict[str, int]:
             existing = existing.rstrip("\n") + f"\n\n{heading}\n\n" if existing else f"{heading}\n\n"
 
         new_lines = "\n".join(line for _, _, line in entries)
-        existing = existing.rstrip("\n") + "\n" + new_lines + "\n"
-        path.write_text(existing)
+        content = existing.rstrip("\n") + "\n" + new_lines + "\n"
+
+        fd, tmp_path = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(content)
+            os.replace(tmp_path, path)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
         written[filepath] = len(entries)
 
     return written

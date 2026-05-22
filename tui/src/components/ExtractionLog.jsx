@@ -1,11 +1,18 @@
 import React from "react";
 import { Box, Text } from "ink";
 
+function truncate(value, maxLength = 42) {
+  if (!value) return "";
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, Math.max(0, maxLength - 1))}…`;
+}
+
 export function ExtractionLog({ extractions }) {
   if (!extractions.length) {
     return (
-      <Box borderStyle="single" borderColor="#1e1e1e" marginX={1} paddingX={2} paddingY={1}>
-        <Text color="#333">  [extraction log — nothing extracted this session yet]</Text>
+      <Box borderStyle="round" borderColor="#444" paddingX={1} paddingY={0} flexDirection="column">
+        <Text color="#888" bold>EXTRACTIONS</Text>
+        <Text color="#666">Nothing extracted in this session yet.</Text>
       </Box>
     );
   }
@@ -35,15 +42,16 @@ export function ExtractionLog({ extractions }) {
   }
 
   return (
-    <Box flexDirection="column" borderStyle="single" borderColor="#1e1e1e" marginX={1} paddingX={2} paddingY={1}>
-      <Text color="#333">  [extraction log — this session]</Text>
+    <Box flexDirection="column" borderStyle="round" borderColor="#444" paddingX={1} paddingY={0}>
+      <Text color="#888" bold>EXTRACTIONS</Text>
+      <Text color="#666">{`${rows.length} captured event${rows.length === 1 ? "" : "s"} this session`}</Text>
       {rows.slice(-12).map((r, i) => (
         <Box key={i}>
-          <Text color="#2a2a2a">{`  ${r.time}  `}</Text>
-          <Text color="#383838">{r.label}</Text>
+          <Text color="#777">{`${r.time}  `}</Text>
+          <Text color="#d0d0d0">{truncate(r.label)}</Text>
         </Box>
       ))}
-      <Text color="#2a2a2a">  /extracted to hide</Text>
+      <Text color="#666">/extracted to hide</Text>
     </Box>
   );
 }

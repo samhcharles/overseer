@@ -11,4 +11,4 @@ kv_namespaces = [
 crons = ["0 15 * * *"]
 
 [vars]
-OVERSEER_API_URL = "https://overseer.wokspec.org"
+# No public URL — Overseer is internal only (Tailscale / VPS localhost).

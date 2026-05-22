@@ -14,6 +14,8 @@ from pathlib import Path
 
 import httpx
 
+from vault_utils import vault_write_atomic
+
 VAULT_PATH = Path(os.environ.get("VAULT_PATH", Path.home() / "vault"))
 OVERSEER_API_URL = os.environ.get("OVERSEER_API_URL", "")
 
@@ -23,9 +25,8 @@ def vault_read(path: Path) -> str:
 
 
 def vault_append(path: Path, text: str, commit_msg: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a") as f:
-        f.write(text)
+    existing = path.read_text() if path.exists() else ""
+    vault_write_atomic(path, existing + text)
     try:
         subprocess.run(["git", "-C", str(VAULT_PATH), "add", str(path)], check=True, capture_output=True)
         subprocess.run(["git", "-C", str(VAULT_PATH), "commit", "-m", commit_msg], check=True, capture_output=True)
@@ -85,9 +86,40 @@ Do not fabricate — only extract what is explicitly stated."""
         print(f"[yap] {summary[:100]}")
 
 
+def scan_yap_inbox() -> None:
+    """Process all unprocessed files in inbox/yap/. Used by the systemd .path unit."""
+    seen_file = Path.home() / ".local" / "state" / "brain-agents" / "yap-seen.json"
+    seen_file.parent.mkdir(parents=True, exist_ok=True)
+    seen: set[str] = set(json.loads(seen_file.read_text())) if seen_file.exists() else set()
+
+    yap_dir = VAULT_PATH / "inbox" / "yap"
+    if not yap_dir.exists():
+        return
+
+    new_files: list[Path] = []
+    for path in sorted(yap_dir.glob("*.md")):
+        key = path.name
+        if key not in seen:
+            if path.stat().st_size > 10:
+                new_files.append(path)
+            seen.add(key)
+
+    for path in new_files:
+        try:
+            process_yap(path)
+        except Exception as e:
+            print(f"[yap] error processing {path}: {e}", file=sys.stderr)
+
+    seen_file.write_text(json.dumps(sorted(seen)))
+
+
 def main() -> None:
+    if len(sys.argv) == 2 and sys.argv[1] == "--scan":
+        scan_yap_inbox()
+        return
+
     if len(sys.argv) < 2:
-        print("Usage: yap_processor.py <yap_file.md>", file=sys.stderr)
+        print("Usage: yap_processor.py <yap_file.md> | --scan", file=sys.stderr)
         sys.exit(1)
 
     yap_file = Path(sys.argv[1])

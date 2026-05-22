@@ -11,7 +11,6 @@ RestartSec=15
 
 EnvironmentFile=-%h/.secrets/master.env
 Environment=VAULT_PATH=%h/vault
-Environment=TAGGER_POLL_INTERVAL=30
 
 [Install]
 WantedBy=default.target

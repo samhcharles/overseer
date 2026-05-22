@@ -15,6 +15,7 @@ export function db() {
     CREATE TABLE IF NOT EXISTS sessions (
       id TEXT PRIMARY KEY,
       title TEXT,
+      mode TEXT DEFAULT 'chat',
       created_at INTEGER,
       updated_at INTEGER
     );
@@ -35,18 +36,25 @@ export function db() {
       created_at INTEGER
     );
   `);
+  try {
+    _db.exec("ALTER TABLE sessions ADD COLUMN mode TEXT DEFAULT 'chat';");
+  } catch {}
   return _db;
 }
 
-export function createSession(title) {
+export function createSession(title, mode = "chat") {
   const id = randomUUID();
   const now = Date.now();
-  db().prepare("INSERT INTO sessions (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)").run(id, title, now, now);
+  db().prepare("INSERT INTO sessions (id, title, mode, created_at, updated_at) VALUES (?, ?, ?, ?, ?)").run(id, title, mode, now, now);
   return id;
 }
 
 export function updateSessionTitle(id, title) {
   db().prepare("UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?").run(title, Date.now(), id);
+}
+
+export function updateSessionMode(id, mode) {
+  db().prepare("UPDATE sessions SET mode = ?, updated_at = ? WHERE id = ?").run(mode, Date.now(), id);
 }
 
 export function touchSession(id) {
@@ -96,6 +104,26 @@ export function getMessages(sessionId, limit = 10) {
     .prepare("SELECT * FROM messages WHERE session_id = ? ORDER BY created_at DESC LIMIT ?")
     .all(sessionId, limit)
     .reverse();
+}
+
+export function listRecentMessages(limit = 100) {
+  return db()
+    .prepare(`
+      SELECT
+        m.id,
+        m.session_id,
+        m.role,
+        m.content,
+        m.tool_calls,
+        m.created_at,
+        COALESCE(s.title, 'untitled') AS session_title,
+        COALESCE(s.mode, 'chat') AS session_mode
+      FROM messages m
+      LEFT JOIN sessions s ON s.id = m.session_id
+      ORDER BY m.created_at DESC
+      LIMIT ?
+    `)
+    .all(limit);
 }
 
 export function addExtraction(sessionId, messageId, entities, vaultWrites) {
