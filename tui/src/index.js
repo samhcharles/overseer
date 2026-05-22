@@ -46,7 +46,8 @@ const COMMANDS = [
 
 const KEYBINDINGS_TEXT = `Keyboard shortcuts:
   Enter          send message
-  Shift+Enter    new line  (Ctrl+J if your terminal can't distinguish)
+  Alt+Enter      new line  (most terminals)
+  Ctrl+J         new line  (universal fallback)
   Shift+Tab      cycle mode (chat → think → capture)
   /              open command picker
   ?              show this help
@@ -1105,6 +1106,25 @@ function MultilineComposer({
       return;
     }
 
+    // Kitty keyboard protocol: Shift+Enter (Windows Terminal with kitty mode)
+    if (input === "\x1b[13;2u") {
+      onChange(`${value}\n`);
+      return;
+    }
+
+    // Alt+Enter: works in most terminals (sends ESC + CR)
+    if (key.meta && key.return) {
+      onChange(`${value}\n`);
+      return;
+    }
+
+    // Ctrl+J: universal newline fallback (^J = 0x0A)
+    if (key.ctrl && input === "\n") {
+      onChange(`${value}\n`);
+      return;
+    }
+
+    // Shift+Enter: only works in terminals with kitty keyboard protocol
     if (key.return && key.shift) {
       onChange(`${value}\n`);
       return;
