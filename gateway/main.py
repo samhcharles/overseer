@@ -91,9 +91,9 @@ def thread_load(thread_id: str, limit: int = 30) -> list[dict]:
 def thread_append(thread_id: str, role: str, content: str) -> None:
     now = datetime.now(timezone.utc).isoformat()
     with _db() as conn:
-        next_turn = (conn.execute(
+        next_turn = conn.execute(
             "SELECT COALESCE(MAX(turn), -1) FROM threads WHERE id=?", (thread_id,)
-        ).fetchone()[0] or -1) + 1
+        ).fetchone()[0] + 1
         conn.execute(
             "INSERT INTO threads (id, turn, role, content, ts) VALUES (?,?,?,?,?)",
             (thread_id, next_turn, role, content, now),
