@@ -14,6 +14,9 @@ GEMINI.md
 tui/dist/
 tui/node_modules/
 
+# Go TUI binary
+tui-go/overseer
+
 # Workers build artifacts
 workers/dist/
 workers/node_modules/

@@ -25,4 +25,5 @@ echo "  vault:  $VAULT_PATH"
 echo "  model:  $OLLAMA_MODEL @ $OLLAMA_URL"
 echo "  gateway: ${GATEWAY_URL:-none}"
 
-exec uvicorn main:app --host 0.0.0.0 --port "$NODE_PORT" --reload
+UVICORN="${UVICORN:-$(command -v uvicorn 2>/dev/null || echo "$HOME/.local/bin/uvicorn")}"
+exec "$UVICORN" main:app --host 0.0.0.0 --port "$NODE_PORT"

@@ -412,16 +412,25 @@ TOOLS_SPEC = [
 # ─── LLM (Ollama only) ────────────────────────────────────────────────────────
 
 async def ollama_chat(messages: list[dict]) -> dict:
-    payload = {
-        "model": OLLAMA_MODEL,
-        "messages": messages,
-        "tools": TOOLS_SPEC,
-        "stream": False,
-    }
+    ctx_opts = {"num_ctx": int(os.environ.get("OLLAMA_CTX", "4096"))}
     async with httpx.AsyncClient(timeout=180) as client:
-        r = await client.post(f"{OLLAMA_URL}/api/chat", json=payload)
+        r = await client.post(f"{OLLAMA_URL}/api/chat", json={
+            "model": OLLAMA_MODEL,
+            "messages": messages,
+            "tools": TOOLS_SPEC,
+            "stream": False,
+            "options": ctx_opts,
+        })
+        if r.status_code == 400:
+            # Model doesn't support native tools API — retry without tools
+            r = await client.post(f"{OLLAMA_URL}/api/chat", json={
+                "model": OLLAMA_MODEL,
+                "messages": messages,
+                "stream": False,
+                "options": ctx_opts,
+            })
         r.raise_for_status()
-        data = r.json()
+    data = r.json()
     msg = data.get("message", {})
     return {
         "content": msg.get("content") or "",
@@ -543,8 +552,8 @@ WHAT YOU DO:
 - Financial transactions → write_finance_transaction (appears in Finance dashboard)
 - Todos and tasks → write_todo (uses Obsidian Tasks syntax with due dates)
 - People and relationships → wiki/personal/people/NAME.md + memory/facts/people.md
-- Movies, books, articles → wiki/personal/{{movies|books|articles}}.md (append row)
-- Knowledge / links → wiki/knowledge/{{slug}}.md (create stub, tag [EMERGING])
+- Movies, books, articles → wiki/personal/[movies|books|articles].md (append row)
+- Knowledge / links → wiki/knowledge/[slug].md (create stub, tag [EMERGING])
 - Project updates → wiki/madhouse/ or wiki/orinadus/ (read first, then update)
 - Anything ambiguous → read wiki/_index.md to find the right page
 
@@ -1067,7 +1076,7 @@ class InferRequest(BaseModel):
 
 @app.post("/infer/chat")
 async def infer_chat(req: InferRequest, request: Request):
-    if NODE_SECRET:
+    if GATEWAY_NODE_SECRET:
         secret = request.headers.get("X-Node-Secret", "")
         if secret != GATEWAY_NODE_SECRET:
             raise HTTPException(status_code=401, detail="unauthorized")
@@ -1140,7 +1149,20 @@ async def _heartbeat_loop() -> None:
             pass
 
 
+async def _warmup_model() -> None:
+    """Load the model into Ollama's memory so the first user request is fast."""
+    try:
+        async with httpx.AsyncClient(timeout=180) as client:
+            await client.post(
+                f"{OLLAMA_URL}/api/generate",
+                json={"model": OLLAMA_MODEL, "prompt": "", "keep_alive": "5m"},
+            )
+    except Exception:
+        pass
+
+
 @app.on_event("startup")
 async def startup():
     await _register_with_gateway()
     asyncio.create_task(_heartbeat_loop())
+    asyncio.create_task(_warmup_model())
