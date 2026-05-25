@@ -1,86 +1,89 @@
 package main
 
 import (
+	"bufio"
 	"crypto/rand"
 	"fmt"
-	"io/fs"
-	"os"
-	"path/filepath"
+	"io"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/textarea"
-	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
+// ── view states ───────────────────────────────────────────────────────────────
+
 type activeView int
 
 const (
-	chatView  activeView = iota
-	vaultView
+	startView activeView = iota
+	chatView
+	sessionView
 )
 
+// ── data types ────────────────────────────────────────────────────────────────
+
 type chatMsg struct {
-	role    string // "user" | "assistant"
+	role    string
 	content string
 }
+
+type activityEntry struct {
+	name    string
+	args    string
+	preview string
+	done    bool
+}
+
+type sessionInfo struct {
+	id       string
+	preview  string
+	modified time.Time
+}
+
+// ── model ─────────────────────────────────────────────────────────────────────
 
 type model struct {
 	width, height int
 	view          activeView
 
-	// API
 	apiURL   string
 	apiOK    bool
 	apiModel string
 
-	// Chat
-	messages []chatMsg
-	msgVP    viewport.Model
-	input    textarea.Model
-	loading  bool
-	threadID string
-	sp       spinner.Model
-	lastErr  string
+	messages      []chatMsg
+	inputBuf      []rune
+	loading       bool
+	threadID      string
+	sp            spinner.Model
+	lastErr       string
+	streamScanner *bufio.Scanner
+	streamBody    io.ReadCloser
 
-	// Vault
-	vaultRoot   string
-	vaultCwd    string
-	vaultFiles  []fs.DirEntry
-	vaultCursor int
-	previewVP   viewport.Model
+	scrollOffset int // lines scrolled up from bottom; 0 = live bottom
+
+	activityLog []activityEntry
+	tokensTotal int
+	tps         float64
+
+	sessions      []sessionInfo
+	sessionCursor int
+	stateDir      string
 }
 
-func newModel(apiURL, vaultPath string) model {
-	ta := textarea.New()
-	ta.Placeholder = "message..."
-	ta.CharLimit = 0
-	ta.ShowLineNumbers = false
-	ta.SetHeight(3)
-	ta.SetWidth(80)
-
+func newModel(apiURL, stateDir string) model {
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(colAccent)
-
-	m := model{
-		apiURL:    apiURL,
-		vaultRoot: vaultPath,
-		vaultCwd:  vaultPath,
-		threadID:  genID(),
-		input:     ta,
-		sp:        sp,
-		msgVP:     viewport.New(80, 20),
-		previewVP: viewport.New(50, 20),
-		messages: []chatMsg{
-			{role: "assistant", content: "ready. ask me anything — i have your vault, recent activity, and context."},
-		},
+	return model{
+		apiURL:   apiURL,
+		stateDir: stateDir,
+		threadID: genID(),
+		sp:       sp,
+		view:     startView,
 	}
-	m.loadVaultDir()
-	m.loadFilePreview()
-	return m
 }
 
 func genID() string {
@@ -89,16 +92,13 @@ func genID() string {
 	return fmt.Sprintf("%x", b)
 }
 
-// ─── Init ─────────────────────────────────────────────────────────────────────
+// ── Init ──────────────────────────────────────────────────────────────────────
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(
-		m.input.Focus(),
-		healthCheckCmd(m.apiURL),
-	)
+	return tea.Batch(healthCheckCmd(m.apiURL), loadSessionsCmd(m.stateDir))
 }
 
-// ─── Update ───────────────────────────────────────────────────────────────────
+// ── Update ────────────────────────────────────────────────────────────────────
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -106,28 +106,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m = m.recalc()
 		return m, nil
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
-
-	case chatResponseMsg:
-		m.loading = false
-		if msg.err != nil {
-			m.lastErr = msg.err.Error()
-		} else {
-			m.messages = append(m.messages, chatMsg{
-				role:    "assistant",
-				content: msg.response,
-			})
-			if msg.model != "" {
-				m.apiModel = msg.model
-			}
-			m.lastErr = ""
-		}
-		m.rebuildChat()
-		return m, m.input.Focus()
 
 	case healthMsg:
 		m.apiOK = msg.ok
@@ -135,6 +117,33 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.apiModel = msg.model
 		}
 		return m, nil
+
+	case sessionsLoadedMsg:
+		m.sessions = msg.sessions
+		return m, nil
+
+	case threadLoadedMsg:
+		if msg.err != nil {
+			m.lastErr = msg.err.Error()
+		} else {
+			m.threadID = msg.threadID
+			m.messages = msg.messages
+			m.activityLog = nil
+			m.scrollOffset = 0
+			m.tokensTotal = 0
+			m.tps = 0
+			m.lastErr = ""
+		}
+		m.view = chatView
+		return m, nil
+
+	case streamStartMsg:
+		m.streamScanner = msg.scanner
+		m.streamBody = msg.body
+		return m, readChunkCmd(m.streamScanner, m.streamBody)
+
+	case chunkMsg:
+		return m.handleChunk(msg)
 
 	case spinner.TickMsg:
 		if !m.loading {
@@ -145,409 +154,647 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
-	// Delegate non-key events to active component
-	var cmds []tea.Cmd
-	if m.view == chatView && !m.loading {
-		var c tea.Cmd
-		m.input, c = m.input.Update(msg)
-		cmds = append(cmds, c)
-	}
-	if m.view == vaultView {
-		var c tea.Cmd
-		m.previewVP, c = m.previewVP.Update(msg)
-		cmds = append(cmds, c)
-	}
-	{
-		var c tea.Cmd
-		m.msgVP, c = m.msgVP.Update(msg)
-		cmds = append(cmds, c)
-	}
-	return m, tea.Batch(cmds...)
+	return m, nil
 }
 
-func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
-
-	case tea.KeyTab:
-		if m.view == chatView {
-			m.view = vaultView
-			m.input.Blur()
-		} else {
-			m.view = chatView
-			return m, m.input.Focus()
+func (m model) handleChunk(msg chunkMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		m.loading = false
+		m.lastErr = msg.err.Error()
+		m.streamScanner = nil
+		m.streamBody = nil
+		if n := len(m.messages); n > 0 && m.messages[n-1].role == "assistant" && m.messages[n-1].content == "" {
+			m.messages = m.messages[:n-1]
 		}
 		return m, nil
+	}
+
+	if msg.done {
+		m.loading = false
+		m.streamScanner = nil
+		m.streamBody = nil
+		if msg.model != "" {
+			m.apiModel = msg.model
+		}
+		if msg.tokens > 0 {
+			m.tokensTotal += msg.tokens
+		}
+		if msg.tps > 0 {
+			m.tps = msg.tps
+		}
+		return m, nil
+	}
+
+	if msg.content != "" {
+		if n := len(m.messages); n > 0 && m.messages[n-1].role == "assistant" {
+			m.messages[n-1].content += msg.content
+		}
+		return m, readChunkCmd(m.streamScanner, m.streamBody)
+	}
+
+	if msg.toolDone {
+		for i := len(m.activityLog) - 1; i >= 0; i-- {
+			if m.activityLog[i].name == msg.toolName && !m.activityLog[i].done {
+				m.activityLog[i].done = true
+				m.activityLog[i].preview = msg.toolPreview
+				break
+			}
+		}
+		return m, readChunkCmd(m.streamScanner, m.streamBody)
+	}
+
+	if msg.toolName != "" {
+		m.activityLog = append(m.activityLog, activityEntry{
+			name: msg.toolName,
+			args: msg.toolArgs,
+		})
+		if len(m.activityLog) > 30 {
+			m.activityLog = m.activityLog[len(m.activityLog)-30:]
+		}
+		return m, readChunkCmd(m.streamScanner, m.streamBody)
+	}
+
+	return m, readChunkCmd(m.streamScanner, m.streamBody)
+}
+
+// ── Key handling ──────────────────────────────────────────────────────────────
+
+func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch m.view {
+	case startView:
+		return m.handleStartKey(msg)
+	case sessionView:
+		return m.handleSessionKey(msg)
+	default:
+		return m.handleChatKey(msg)
+	}
+}
+
+func (m model) handleStartKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.Type == tea.KeyCtrlC {
+		return m, tea.Quit
+	}
+	if msg.Type == tea.KeyEnter {
+		if len(m.sessions) > 0 {
+			return m, loadThreadCmd(m.apiURL, m.sessions[0].id)
+		}
+	}
+	if msg.Type == tea.KeyRunes {
+		switch msg.String() {
+		case "l", "L":
+			if len(m.sessions) > 0 {
+				m.view = sessionView
+				m.sessionCursor = 0
+				return m, nil
+			}
+		}
+	}
+	// Any key → new session
+	m.view = chatView
+	m.messages = []chatMsg{{role: "assistant", content: "ready. what do you need?"}}
+	return m, nil
+}
+
+func (m model) handleSessionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyCtrlC:
+		return m, tea.Quit
+	case tea.KeyEsc:
+		m.view = chatView
+		if len(m.messages) == 0 {
+			m.messages = []chatMsg{{role: "assistant", content: "ready. what do you need?"}}
+		}
+		return m, nil
+	case tea.KeyUp:
+		if m.sessionCursor > 0 {
+			m.sessionCursor--
+		}
+		return m, nil
+	case tea.KeyDown:
+		if m.sessionCursor < len(m.sessions)-1 {
+			m.sessionCursor++
+		}
+		return m, nil
+	case tea.KeyEnter:
+		if len(m.sessions) > 0 {
+			return m, loadThreadCmd(m.apiURL, m.sessions[m.sessionCursor].id)
+		}
+		m.view = chatView
+		return m, nil
+	case tea.KeyRunes:
+		if msg.String() == "n" || msg.String() == "N" {
+			m.threadID = genID()
+			m.messages = []chatMsg{{role: "assistant", content: "ready. what do you need?"}}
+			m.activityLog = nil
+			m.tokensTotal = 0
+			m.tps = 0
+			m.scrollOffset = 0
+			m.view = chatView
+			return m, nil
+		}
+	}
+	return m, nil
+}
+
+func (m model) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Always-on keys
+	switch msg.Type {
+	case tea.KeyCtrlC:
+		return m, tea.Quit
 
 	case tea.KeyEsc:
 		if m.loading {
 			m.loading = false
-			return m, m.input.Focus()
-		}
-		return m, nil
-
-	case tea.KeyEnter:
-		if m.view == chatView && !m.loading {
-			text := strings.TrimSpace(m.input.Value())
-			if text == "" {
-				return m, nil
+			if m.streamBody != nil {
+				m.streamBody.Close()
+				m.streamBody = nil
+				m.streamScanner = nil
 			}
-			m.input.Reset()
-			m.messages = append(m.messages, chatMsg{role: "user", content: text})
-			m.loading = true
-			m.lastErr = ""
-			m.rebuildChat()
-			return m, tea.Batch(
-				m.sp.Tick,
-				sendMessageCmd(m.apiURL, text, m.threadID),
-			)
-		}
-		if m.view == vaultView {
-			return m.vaultEnter()
-		}
-		return m, nil
-
-	case tea.KeyCtrlJ:
-		if m.view == chatView && !m.loading {
-			m.input.InsertString("\n")
+			if n := len(m.messages); n > 0 && m.messages[n-1].role == "assistant" && m.messages[n-1].content == "" {
+				m.messages = m.messages[:n-1]
+			}
 		}
 		return m, nil
 
 	case tea.KeyUp:
-		if m.view == vaultView {
-			if m.vaultCursor > 0 {
-				m.vaultCursor--
-				m.loadFilePreview()
-			}
-			return m, nil
-		}
-		m.msgVP.LineUp(3)
+		m.scrollOffset++
 		return m, nil
 
 	case tea.KeyDown:
-		if m.view == vaultView {
-			if m.vaultCursor < len(m.vaultFiles)-1 {
-				m.vaultCursor++
-				m.loadFilePreview()
-			}
-			return m, nil
+		if m.scrollOffset > 0 {
+			m.scrollOffset--
 		}
-		m.msgVP.LineDown(3)
 		return m, nil
 
 	case tea.KeyPgUp:
-		m.msgVP.ViewUp()
+		m.scrollOffset += 10
 		return m, nil
 
 	case tea.KeyPgDown:
-		m.msgVP.ViewDown()
+		if m.scrollOffset > 10 {
+			m.scrollOffset -= 10
+		} else {
+			m.scrollOffset = 0
+		}
+		return m, nil
+
+	case tea.KeyCtrlL:
+		m.view = sessionView
+		m.sessionCursor = 0
+		return m, loadSessionsCmd(m.stateDir)
+	}
+
+	if m.loading {
+		return m, nil
+	}
+
+	switch msg.Type {
+	case tea.KeyEnter:
+		if msg.Alt {
+			m.inputBuf = append(m.inputBuf, '\n')
+			return m, nil
+		}
+		text := strings.TrimSpace(string(m.inputBuf))
+		if text == "" {
+			return m, nil
+		}
+		m.inputBuf = nil
+		m.messages = append(m.messages, chatMsg{role: "user", content: text})
+		m.messages = append(m.messages, chatMsg{role: "assistant", content: ""})
+		m.loading = true
+		m.lastErr = ""
+		m.scrollOffset = 0
+		return m, tea.Batch(m.sp.Tick, startStreamCmd(m.apiURL, text, m.threadID))
+
+	case tea.KeyCtrlJ:
+		m.inputBuf = append(m.inputBuf, '\n')
+		return m, nil
+
+	case tea.KeySpace:
+		m.inputBuf = append(m.inputBuf, ' ')
+		return m, nil
+
+	case tea.KeyBackspace, tea.KeyDelete:
+		if len(m.inputBuf) > 0 {
+			m.inputBuf = m.inputBuf[:len(m.inputBuf)-1]
+		}
 		return m, nil
 
 	case tea.KeyRunes:
-		if m.view == vaultView {
-			switch msg.String() {
-			case "-":
-				parent := filepath.Dir(m.vaultCwd)
-				if parent != m.vaultCwd && strings.HasPrefix(parent+"/", m.vaultRoot+"/") || parent == m.vaultRoot {
-					m.vaultCwd = parent
-					m.vaultCursor = 0
-					m.loadVaultDir()
-					m.loadFilePreview()
-				}
-				return m, nil
-			}
-		}
-	}
+		m.inputBuf = append(m.inputBuf, []rune(msg.String())...)
+		return m, nil
 
-	// Pass unhandled keys to the active component
-	if m.view == chatView && !m.loading {
-		var cmd tea.Cmd
-		m.input, cmd = m.input.Update(msg)
-		return m, cmd
-	}
-	if m.view == vaultView {
-		var cmd tea.Cmd
-		m.previewVP, cmd = m.previewVP.Update(msg)
-		return m, cmd
-	}
-	return m, nil
-}
-
-func (m model) vaultEnter() (tea.Model, tea.Cmd) {
-	if len(m.vaultFiles) == 0 {
+	case tea.KeyCtrlN:
+		m.threadID = genID()
+		m.messages = []chatMsg{{role: "assistant", content: "ready. what do you need?"}}
+		m.activityLog = nil
+		m.tokensTotal = 0
+		m.tps = 0
+		m.scrollOffset = 0
+		m.lastErr = ""
 		return m, nil
 	}
-	f := m.vaultFiles[m.vaultCursor]
-	if f.IsDir() {
-		m.vaultCwd = filepath.Join(m.vaultCwd, f.Name())
-		m.vaultCursor = 0
-		m.loadVaultDir()
-		m.loadFilePreview()
-	}
+
 	return m, nil
 }
 
-// ─── vault helpers ────────────────────────────────────────────────────────────
+// ── word wrap ─────────────────────────────────────────────────────────────────
 
-func (m *model) loadVaultDir() {
-	entries, err := os.ReadDir(m.vaultCwd)
-	if err != nil {
-		m.vaultFiles = nil
-		return
+func wordWrap(text string, width int) []string {
+	if width <= 0 {
+		width = 80
 	}
-	var dirs, files []fs.DirEntry
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), ".") {
+	var result []string
+	for _, para := range strings.Split(text, "\n") {
+		if para == "" {
+			result = append(result, "")
 			continue
 		}
-		if e.IsDir() {
-			dirs = append(dirs, e)
-		} else {
-			files = append(files, e)
-		}
-	}
-	m.vaultFiles = append(dirs, files...)
-	if m.vaultCursor >= len(m.vaultFiles) {
-		m.vaultCursor = 0
-	}
-}
-
-func (m *model) loadFilePreview() {
-	if len(m.vaultFiles) == 0 {
-		m.previewVP.SetContent("")
-		return
-	}
-	f := m.vaultFiles[m.vaultCursor]
-	path := filepath.Join(m.vaultCwd, f.Name())
-
-	if f.IsDir() {
-		entries, err := os.ReadDir(path)
-		if err != nil {
-			m.previewVP.SetContent("[cannot read directory]")
-			return
-		}
-		var sb strings.Builder
-		for _, e := range entries {
-			if strings.HasPrefix(e.Name(), ".") {
-				continue
+		words := strings.Fields(para)
+		var line strings.Builder
+		for _, w := range words {
+			if line.Len()+len(w)+1 > width && line.Len() > 0 {
+				result = append(result, line.String())
+				line.Reset()
 			}
-			if e.IsDir() {
-				sb.WriteString(dirStyle.Render(e.Name()+"/") + "\n")
-			} else {
-				sb.WriteString(fileStyle.Render("  "+e.Name()) + "\n")
+			if line.Len() > 0 {
+				line.WriteByte(' ')
 			}
+			line.WriteString(w)
 		}
-		if sb.Len() == 0 {
-			sb.WriteString(hintStyle.Render("(empty)"))
+		if line.Len() > 0 {
+			result = append(result, line.String())
 		}
-		m.previewVP.SetContent(sb.String())
-	} else {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			m.previewVP.SetContent("[cannot read file]")
-			return
-		}
-		lines := strings.Split(string(data), "\n")
-		if len(lines) > 300 {
-			lines = append(lines[:300], "... (truncated)")
-		}
-		m.previewVP.SetContent(strings.Join(lines, "\n"))
 	}
-	m.previewVP.GotoTop()
+	return result
 }
 
-// ─── chat helpers ─────────────────────────────────────────────────────────────
-
-func (m *model) rebuildChat() {
-	if m.msgVP.Width == 0 {
-		return
+func trunc(s string, max int) string {
+	if max < 1 {
+		return ""
 	}
-	var sb strings.Builder
-	wrapW := m.msgVP.Width - 2
-	if wrapW < 20 {
-		wrapW = 20
+	if len(s) <= max {
+		return s
 	}
-	for _, msg := range m.messages {
-		if msg.role == "user" {
-			sb.WriteString(userLabelStyle.Render("you") + "\n")
-		} else {
-			sb.WriteString(asstLabelStyle.Render("overseer") + "\n")
-		}
-		sb.WriteString(lipgloss.NewStyle().Width(wrapW).Render(msg.content))
-		sb.WriteString("\n\n")
+	if max <= 1 {
+		return "~"
 	}
-	if m.lastErr != "" {
-		sb.WriteString(errStyle.Render("error: "+m.lastErr) + "\n")
-	}
-	m.msgVP.SetContent(sb.String())
-	m.msgVP.GotoBottom()
+	return s[:max-1] + "~"
 }
 
-// ─── layout ───────────────────────────────────────────────────────────────────
+// ── layout constants ──────────────────────────────────────────────────────────
 
-func (m model) recalc() model {
-	// Input area: textarea rows + 2 border + 1 padding line above
-	inputH := m.input.Height() + 3
-	if inputH < 5 {
-		inputH = 5
+const panelWidth = 26
+
+func (m model) usePanel() bool { return m.width > 82 }
+
+func (m model) leftWidth() int {
+	if m.usePanel() {
+		return m.width - panelWidth - 1
 	}
-
-	// Chat content: full height minus header, status, separator, input
-	chatContentH := m.height - 1 - 1 - 1 - inputH
-	if chatContentH < 3 {
-		chatContentH = 3
-	}
-
-	// Vault content: full height minus header, status
-	vaultContentH := m.height - 1 - 1 - 1
-	if vaultContentH < 3 {
-		vaultContentH = 3
-	}
-
-	m.msgVP.Width = m.width
-	m.msgVP.Height = chatContentH
-
-	leftW := m.width / 3
-	if leftW < 20 {
-		leftW = 20
-	}
-	rightW := m.width - leftW - 1
-	if rightW < 10 {
-		rightW = 10
-	}
-	m.previewVP.Width = rightW - 2
-	m.previewVP.Height = vaultContentH
-
-	m.input.SetWidth(m.width - 4)
-	m.rebuildChat()
-	return m
+	return m.width
 }
 
-// ─── View ─────────────────────────────────────────────────────────────────────
+// ── View dispatch ─────────────────────────────────────────────────────────────
 
 func (m model) View() string {
-	if m.width == 0 {
-		return "initializing..."
+	w := m.width
+	if w == 0 {
+		w = 80
 	}
-
-	header := m.renderHeader()
-	status := m.renderStatus()
-
-	var content string
+	h := m.height
+	if h == 0 {
+		h = 24
+	}
 	switch m.view {
-	case chatView:
-		content = m.renderChat()
-	case vaultView:
-		content = m.renderVault()
+	case startView:
+		return m.renderStart(w, h)
+	case sessionView:
+		return m.renderSession(w, h)
+	default:
+		return m.renderMain(w, h)
 	}
-
-	return header + "\n" + content + "\n" + status
 }
 
-func (m model) renderHeader() string {
-	var badge string
-	switch m.view {
-	case chatView:
-		badge = badgeStyle.Render("chat")
-	case vaultView:
-		badge = badgeStyle.Render("vault")
+// ── Start screen ──────────────────────────────────────────────────────────────
+
+func (m model) renderStart(w, h int) string {
+	center := func(s string) string {
+		n := lipgloss.Width(s)
+		pad := (w - n) / 2
+		if pad < 0 {
+			pad = 0
+		}
+		return strings.Repeat(" ", pad) + s
 	}
 
-	modelLabel := ""
+	var lines []string
+	topPad := (h - 12) / 2
+	if topPad < 0 {
+		topPad = 0
+	}
+	for i := 0; i < topPad; i++ {
+		lines = append(lines, "")
+	}
+
+	lines = append(lines, center(titleStyle.Render("overseer")))
+	lines = append(lines, center(hintStyle.Render("your second brain, running local")))
+	lines = append(lines, "")
+	lines = append(lines, center(sepStyle.Render(strings.Repeat("─", 28))))
+	lines = append(lines, "")
+
+	dot := statusDot(m.apiOK)
+	modelStr := "connecting..."
 	if m.apiModel != "" {
-		modelLabel = "  " + hintStyle.Render(m.apiModel)
+		modelStr = m.apiModel
+	}
+	lines = append(lines, center(dot+"  "+hintStyle.Render(modelStr)))
+	lines = append(lines, "")
+
+	if len(m.sessions) > 0 {
+		last := m.sessions[0]
+		preview := last.preview
+		if preview == "" {
+			preview = last.id
+		}
+		lines = append(lines, center(hintStyle.Render(fmt.Sprintf("%d session(s) saved", len(m.sessions)))))
+		lines = append(lines, center(hintStyle.Render("last: "+trunc(preview, 40))))
+		lines = append(lines, "")
+		lines = append(lines, center(hintStyle.Render("enter → resume last   any key → new session")))
+		lines = append(lines, center(hintStyle.Render("l → session list")))
+	} else {
+		lines = append(lines, center(hintStyle.Render("press any key to start")))
 	}
 
-	left := titleStyle.Render("overseer") + "  " + badge + modelLabel
-	right := statusDot(m.apiOK)
+	for len(lines) < h {
+		lines = append(lines, "")
+	}
+	return strings.Join(lines[:h], "\n")
+}
 
-	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right)
-	if gap < 0 {
-		gap = 0
+// ── Session list ──────────────────────────────────────────────────────────────
+
+func (m model) renderSession(w, h int) string {
+	var lines []string
+
+	hdr := titleStyle.Render("sessions") + "   " +
+		hintStyle.Render("↑↓:navigate  enter:load  n:new  esc:back  ctrl+c:quit")
+	lines = append(lines, hdr)
+	lines = append(lines, sepStyle.Render(strings.Repeat("─", w)))
+
+	maxShow := h - 5
+	for i, s := range m.sessions {
+		if i >= maxShow {
+			break
+		}
+		timeStr := s.modified.Format("Jan 02 15:04")
+		preview := s.preview
+		previewMax := w - 22
+		if previewMax < 10 {
+			previewMax = 10
+		}
+		if len(preview) > previewMax {
+			preview = preview[:previewMax-3] + "..."
+		}
+		row := fmt.Sprintf("  %s  %s", timeStr, preview)
+		if i == m.sessionCursor {
+			row = selectedStyle.Render(fmt.Sprintf("▶ %s  %s", timeStr, preview))
+		}
+		lines = append(lines, row)
+	}
+
+	if len(m.sessions) == 0 {
+		lines = append(lines, "")
+		lines = append(lines, "  "+hintStyle.Render("no sessions yet"))
+	}
+
+	lines = append(lines, "")
+	lines = append(lines, "  "+hintStyle.Render("n → start new session"))
+
+	for len(lines) < h {
+		lines = append(lines, "")
+	}
+	return strings.Join(lines[:h], "\n")
+}
+
+// ── Main chat view ────────────────────────────────────────────────────────────
+
+func (m model) renderMain(w, h int) string {
+	return m.renderHeader(w) + "\n" + m.renderBody(w, h) + "\n" + m.renderStatus(w)
+}
+
+func (m model) renderHeader(w int) string {
+	left := titleStyle.Render("overseer")
+	if m.apiModel != "" {
+		left += "  " + hintStyle.Render(m.apiModel)
+	}
+
+	var rightParts []string
+	if m.tokensTotal > 0 {
+		stat := fmt.Sprintf("%d tok", m.tokensTotal)
+		if m.tps > 0 {
+			stat += fmt.Sprintf("  %.0f t/s", m.tps)
+		}
+		rightParts = append(rightParts, statsStyle.Render(stat))
+	}
+	if m.scrollOffset > 0 {
+		rightParts = append(rightParts, scrollStyle.Render(fmt.Sprintf("↑%d", m.scrollOffset)))
+	}
+	rightParts = append(rightParts, statusDot(m.apiOK))
+	right := strings.Join(rightParts, "  ")
+
+	gap := w - lipgloss.Width(left) - lipgloss.Width(right)
+	if gap < 1 {
+		gap = 1
 	}
 	return left + strings.Repeat(" ", gap) + right
 }
 
-func (m model) renderStatus() string {
-	var hints string
-	switch m.view {
-	case chatView:
-		hints = "enter:send   ctrl+j:newline   pgup/pgdn:scroll   tab:vault   ctrl+c:quit"
-	case vaultView:
-		hints = "tab:chat   ↑↓:navigate   enter:open   -:parent   ctrl+c:quit"
-	}
+func (m model) renderStatus(w int) string {
+	hints := "enter:send  ctrl+j/alt+enter:newline  ↑↓:scroll  ctrl+n:new  ctrl+l:sessions  ctrl+c:quit"
+	_ = w
 	return statusStyle.Render(hints)
 }
 
-func (m model) renderChat() string {
-	sep := sepStyle.Render(strings.Repeat("─", m.width))
-
-	var inputArea string
-	if m.loading {
-		inputArea = inputBoxStyle.Width(m.width - 2).Render(
-			m.sp.View() + " thinking...",
-		)
-	} else {
-		inputArea = inputBoxStyle.Width(m.width - 2).Render(m.input.View())
+func (m model) renderBody(w, h int) string {
+	// h total lines: 1 header + 1 (body) + 1 status = 3 fixed, so body = h - 2
+	bodyH := h - 2
+	if bodyH < 3 {
+		bodyH = 3
 	}
 
-	return m.msgVP.View() + "\n" + sep + "\n" + inputArea
+	// body = msgArea(bodyH-2) + sep(1) + input(1)
+	msgAreaH := bodyH - 2
+	if msgAreaH < 1 {
+		msgAreaH = 1
+	}
+
+	lw := m.leftWidth()
+	useP := m.usePanel()
+
+	chatLines := m.buildChatLines(lw, msgAreaH)
+
+	var panelLines []string
+	if useP {
+		panelLines = m.buildPanelLines(panelWidth, bodyH)
+	}
+
+	var rows []string
+	for i := 0; i < msgAreaH; i++ {
+		left := ""
+		if i < len(chatLines) {
+			left = chatLines[i]
+		}
+		if !useP {
+			rows = append(rows, left)
+			continue
+		}
+		padN := lw - lipgloss.Width(left)
+		if padN < 0 {
+			padN = 0
+		}
+		right := ""
+		if i < len(panelLines) {
+			right = panelLines[i]
+		}
+		rows = append(rows, left+strings.Repeat(" ", padN)+sepStyle.Render("│")+right)
+	}
+
+	sep := sepStyle.Render(strings.Repeat("─", w))
+	input := m.renderInput()
+
+	return strings.Join(rows, "\n") + "\n" + sep + "\n" + input
 }
 
-func (m model) renderVault() string {
-	leftW := m.width / 3
-	if leftW < 20 {
-		leftW = 20
-	}
-
-	// Left panel: file list
-	var list strings.Builder
-	relPath, _ := filepath.Rel(m.vaultRoot, m.vaultCwd)
-	if relPath == "." {
-		relPath = "/"
-	} else {
-		relPath = "/" + relPath
-	}
-	list.WriteString(hintStyle.Render(relPath) + "\n")
-	list.WriteString(hintStyle.Render(strings.Repeat("─", leftW-1)) + "\n")
-
-	maxName := leftW - 4
-	for i, f := range m.vaultFiles {
-		name := f.Name()
-		if f.IsDir() {
-			name += "/"
+func (m model) renderInput() string {
+	if m.loading {
+		n := len(m.messages)
+		if n > 0 && m.messages[n-1].role == "assistant" && m.messages[n-1].content == "" {
+			return m.sp.View() + " thinking..."
 		}
-		if len(name) > maxName {
-			name = name[:maxName-1] + "~"
-		}
+		return hintStyle.Render("▌")
+	}
+	inputText := string(m.inputBuf)
+	lines := strings.Split(inputText, "\n")
+	display := lines[len(lines)-1]
+	if len(lines) > 1 {
+		display = fmt.Sprintf("[%d lines] ", len(lines)) + display
+	}
+	return hintStyle.Render("> ") + display + "█"
+}
 
-		var line string
-		if i == m.vaultCursor {
-			line = selectedStyle.Render("> " + name)
-		} else if f.IsDir() {
-			line = "  " + dirStyle.Render(name)
+// ── Chat line builder ─────────────────────────────────────────────────────────
+
+func (m model) buildChatLines(w, maxLines int) []string {
+	var all []string
+	for _, msg := range m.messages {
+		var label string
+		if msg.role == "user" {
+			label = userLabelStyle.Render("you")
 		} else {
-			line = "  " + fileStyle.Render(name)
+			label = asstLabelStyle.Render("overseer")
 		}
-		list.WriteString(line + "\n")
+		all = append(all, label)
+		wrapped := wordWrap(msg.content, w-2)
+		if len(wrapped) == 0 {
+			wrapped = []string{""}
+		}
+		for _, line := range wrapped {
+			all = append(all, "  "+line)
+		}
+		all = append(all, "")
+	}
+	if m.lastErr != "" {
+		all = append(all, errStyle.Render("error: "+m.lastErr))
+		all = append(all, "")
 	}
 
-	leftPanel := lipgloss.NewStyle().
-		Width(leftW).
-		Height(m.previewVP.Height + 2).
-		Render(list.String())
-
-	// Divider column
-	divLines := make([]string, m.previewVP.Height+2)
-	for i := range divLines {
-		divLines[i] = sepStyle.Render("│")
+	total := len(all)
+	start := total - maxLines - m.scrollOffset
+	if start < 0 {
+		start = 0
 	}
-	divider := strings.Join(divLines, "\n")
+	end := start + maxLines
+	if end > total {
+		end = total
+	}
+	visible := append([]string{}, all[start:end]...)
 
-	// Right panel: preview
-	rightPanel := lipgloss.NewStyle().
-		Width(m.previewVP.Width + 2).
-		Padding(0, 1).
-		Render(m.previewVP.View())
+	// Pad top with empty lines
+	for len(visible) < maxLines {
+		visible = append([]string{""}, visible...)
+	}
+	return visible
+}
 
-	return lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, divider, rightPanel)
+// ── Activity panel builder ────────────────────────────────────────────────────
+
+func (m model) buildPanelLines(w, h int) []string {
+	lines := make([]string, h)
+
+	idx := 0
+
+	set := func(s string) {
+		if idx < h {
+			lines[idx] = s
+			idx++
+		}
+	}
+
+	set(panelTitleStyle.Render("activity"))
+	set(sepStyle.Render(strings.Repeat("─", w)))
+
+	// Entries — show last N that fit, reserve 3 for stats
+	statsH := 3
+	entryAreaH := h - 2 - statsH
+	if entryAreaH < 0 {
+		entryAreaH = 0
+	}
+
+	entries := m.activityLog
+	// Estimate lines per entry: name line + optional args/preview = 2
+	maxEntries := entryAreaH / 2
+	if maxEntries < 1 {
+		maxEntries = 1
+	}
+	if len(entries) > maxEntries {
+		entries = entries[len(entries)-maxEntries:]
+	}
+
+	for _, e := range entries {
+		if idx >= h-statsH {
+			break
+		}
+		var nameLine string
+		if e.done {
+			nameLine = activityDoneStyle.Render("✓") + " " + hintStyle.Render(trunc(e.name, w-3))
+		} else {
+			nameLine = activityActiveStyle.Render("·") + " " + activityActiveStyle.Render(trunc(e.name, w-3))
+		}
+		set(nameLine)
+
+		detail := ""
+		if e.preview != "" {
+			detail = e.preview
+		} else if e.args != "" {
+			detail = e.args
+		}
+		if detail != "" && idx < h-statsH {
+			set("  " + hintStyle.Render(trunc(detail, w-3)))
+		}
+	}
+
+	// Stats block at bottom
+	if m.tokensTotal > 0 {
+		statsLine := fmt.Sprintf("%d tok", m.tokensTotal)
+		if m.tps > 0 {
+			statsLine += fmt.Sprintf("  %.0f t/s", m.tps)
+		}
+		if h >= 3 {
+			lines[h-3] = sepStyle.Render(strings.Repeat("─", w))
+			lines[h-2] = statsStyle.Render(statsLine)
+		}
+	}
+
+	return lines
 }

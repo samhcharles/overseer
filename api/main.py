@@ -8,7 +8,6 @@ import json
 import logging
 import os
 import re
-import socket
 import sqlite3
 import subprocess
 import threading
@@ -27,21 +26,12 @@ OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434").rstrip("/")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "dolphin3:latest")
 USER_TIMEZONE = os.environ.get("USER_TIMEZONE", "America/Los_Angeles")
 SLEIPNIR_DB = Path(os.environ.get("SLEIPNIR_DB", str(Path.home() / ".local/share/urchin/sleipnir.db")))
+URCHIN_JOURNAL = Path(os.environ.get("URCHIN_JOURNAL", str(Path.home() / ".local/share/urchin/journal/events.jsonl")))
 
-# Gateway registration (optional — only if GATEWAY_URL is set)
-GATEWAY_URL = os.environ.get("GATEWAY_URL", "").rstrip("/")
 GATEWAY_NODE_SECRET = os.environ.get("NODE_SECRET", "")
-NODE_ID = os.environ.get("NODE_ID", f"saucemachine-{socket.gethostname()}")
-NODE_INFERENCE_URL = os.environ.get("NODE_INFERENCE_URL", "")  # public or Tailscale URL of this node
-NODE_PORT = int(os.environ.get("NODE_PORT", "7860"))
 
 STATE_DIR = Path(os.environ.get("OVERSEER_STATE_DIR", str(Path.home() / ".local/state/overseer")))
 THREADS_DIR = STATE_DIR / "threads"
-
-_SKIP_EXTRACTION_RE = re.compile(
-    r"^\s*(hi|hello|hey|ok|k|thanks|thx|sure|yes|no|yep|nope|cool|got it|lol|haha|bye|done|nice)\W*$",
-    re.IGNORECASE,
-)
 
 # Thread history: thread_id → list of {role, content} messages
 _threads: dict[str, list[dict]] = {}
@@ -409,12 +399,12 @@ TOOLS_SPEC = [
 ]
 
 
-# ─── LLM (Ollama only) ────────────────────────────────────────────────────────
+# ─── LLM providers ───────────────────────────────────────────────────────────
 
-async def ollama_chat(messages: list[dict]) -> dict:
+async def _ollama_request(url: str, messages: list[dict]) -> dict:
     ctx_opts = {"num_ctx": int(os.environ.get("OLLAMA_CTX", "4096"))}
     async with httpx.AsyncClient(timeout=180) as client:
-        r = await client.post(f"{OLLAMA_URL}/api/chat", json={
+        r = await client.post(f"{url}/api/chat", json={
             "model": OLLAMA_MODEL,
             "messages": messages,
             "tools": TOOLS_SPEC,
@@ -422,8 +412,7 @@ async def ollama_chat(messages: list[dict]) -> dict:
             "options": ctx_opts,
         })
         if r.status_code == 400:
-            # Model doesn't support native tools API — retry without tools
-            r = await client.post(f"{OLLAMA_URL}/api/chat", json={
+            r = await client.post(f"{url}/api/chat", json={
                 "model": OLLAMA_MODEL,
                 "messages": messages,
                 "stream": False,
@@ -438,12 +427,82 @@ async def ollama_chat(messages: list[dict]) -> dict:
     }
 
 
+async def ollama_chat(messages: list[dict]) -> dict:
+    try:
+        return await _ollama_request(OLLAMA_URL, messages)
+    except Exception as e:
+        fallback = "http://localhost:11434"
+        if OLLAMA_URL != fallback:
+            logging.warning("ollama at %s failed (%s), falling back to %s", OLLAMA_URL, e, fallback)
+            return await _ollama_request(fallback, messages)
+        raise
+
+
+async def _stream_ollama(url: str, messages: list[dict], ctx_opts: dict):
+    """Async generator yielding (content, tool_calls, stats_or_None) tuples."""
+    async with httpx.AsyncClient(timeout=180) as client:
+        body = {
+            "model": OLLAMA_MODEL,
+            "messages": messages,
+            "tools": TOOLS_SPEC,
+            "stream": True,
+            "options": ctx_opts,
+        }
+        tools_ok = True
+        async with client.stream("POST", f"{url}/api/chat", json=body) as resp:
+            if resp.status_code == 400:
+                tools_ok = False
+            else:
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    if not line.strip():
+                        continue
+                    data = json.loads(line)
+                    msg = data.get("message", {})
+                    stats = None
+                    if data.get("done"):
+                        stats = {"eval_count": data.get("eval_count", 0), "eval_duration": data.get("eval_duration", 0)}
+                    yield msg.get("content") or "", msg.get("tool_calls") or [], stats
+
+        if not tools_ok:
+            body2 = {k: v for k, v in body.items() if k != "tools"}
+            async with client.stream("POST", f"{url}/api/chat", json=body2) as resp:
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    if not line.strip():
+                        continue
+                    data = json.loads(line)
+                    stats = None
+                    if data.get("done"):
+                        stats = {"eval_count": data.get("eval_count", 0), "eval_duration": data.get("eval_duration", 0)}
+                    yield data.get("message", {}).get("content") or "", [], stats
+
+
 async def run_tool_loop(messages: list[dict]) -> tuple[str, list[str]]:
     tool_log: list[str] = []
     for _ in range(12):
         response = await ollama_chat(messages)
         content = response["content"]
         tool_calls = response["tool_calls"]
+
+        # Text-based tool calling fallback (@@TOOL@@ protocol for models that ignore native tools)
+        text_tool_calls = re.findall(r'^@@TOOL@@(\{.+\})', content, re.MULTILINE)
+        if text_tool_calls and not tool_calls:
+            for raw in text_tool_calls:
+                try:
+                    data = json.loads(raw)
+                    tool_name = data.pop("t", None)
+                    if tool_name and tool_name in TOOLS_MAP:
+                        short_args = ", ".join(f"{k}={repr(v)[:40]}" for k, v in data.items())
+                        tool_log.append(f"{tool_name}({short_args})")
+                        try:
+                            TOOLS_MAP[tool_name](**data)
+                        except Exception as e:
+                            logging.warning("text tool error %s: %s", tool_name, e)
+                except (json.JSONDecodeError, TypeError, KeyError) as e:
+                    logging.warning("text tool parse: %s in %r", e, raw)
+            clean = re.sub(r'^@@TOOL@@\{.+\}\n?', '', content, flags=re.MULTILINE).strip()
+            return clean, tool_log
 
         if not tool_calls:
             return content, tool_log
@@ -478,13 +537,69 @@ async def run_tool_loop(messages: list[dict]) -> tuple[str, list[str]]:
 
 # ─── system prompt ────────────────────────────────────────────────────────────
 
+def _read_urchin_journal(hours: int = 6) -> str:
+    """Read recent events directly from the Urchin journal JSONL file."""
+    if not URCHIN_JOURNAL.exists():
+        return ""
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    NOISE = {"", "ls", "pwd", "clear", "exit", "history"}
+    SOURCE_LABELS = {
+        "shell": "shell", "git": "git", "browser": "web",
+        "vscode": "editor", "copilot": "ai", "claude": "ai",
+    }
+    events: list[tuple[datetime, str, str]] = []
+    try:
+        # Read tail of file efficiently — scan last 200KB
+        size = URCHIN_JOURNAL.stat().st_size
+        seek = max(0, size - 200_000)
+        with open(URCHIN_JOURNAL, "r", errors="replace") as f:
+            if seek:
+                f.seek(seek)
+                f.readline()  # skip partial line
+            for line in f:
+                try:
+                    e = json.loads(line)
+                    ts_raw = e.get("timestamp", "")
+                    if not ts_raw:
+                        continue
+                    ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+                    if ts < cutoff:
+                        continue
+                    source = e.get("source", "")
+                    content = (e.get("content") or "").strip()
+                    if not content or content in NOISE or content.startswith("#"):
+                        continue
+                    label = SOURCE_LABELS.get(source, source)
+                    events.append((ts, label, content[:120]))
+                except Exception:
+                    pass
+    except Exception:
+        return ""
+    if not events:
+        return ""
+    # Deduplicate consecutive identical content
+    deduped = []
+    prev = None
+    for ts, label, content in events:
+        if content != prev:
+            deduped.append((ts, label, content))
+            prev = content
+    # Group into a readable summary
+    lines = [f"[{label}] {content}" for _, label, content in deduped[-40:]]
+    return "\n".join(lines)
+
+
 def _recent_activity_context() -> str:
-    activity = sleipnir_query(hours=3)
-    if "[" in activity and "not found" in activity:
-        return ""
-    if "[no activity" in activity:
-        return ""
-    return f"\nRecent activity (last 3h):\n{activity}\n"
+    # Prefer Sleipnir clusters (distilled, semantically grouped)
+    if SLEIPNIR_DB.exists():
+        activity = sleipnir_query(hours=6)
+        if activity and "[" not in activity:
+            return f"\nRecent activity (Sleipnir, last 6h):\n{activity}\n"
+    # Fall back to raw Urchin journal
+    raw = _read_urchin_journal(hours=6)
+    if raw:
+        return f"\nRecent activity (Urchin journal, last 6h):\n{raw}\n"
+    return ""
 
 
 def _load_facts() -> str:
@@ -525,60 +640,47 @@ _SYSTEM_PROMPT_TTL = 120  # rebuild every 2 minutes to pick up new Sleipnir data
 def build_system_prompt() -> str:
     tz = ZoneInfo(USER_TIMEZONE)
     now_str = datetime.now(tz).strftime("%Y-%m-%d, %A, %H:%M %Z")
-    today = datetime.now(tz).strftime("%Y-%m-%d")
-    activity = _recent_activity_context()
     facts = _load_facts()
-    skills = _skills_index()
 
-    return f"""You are Overseer — Sam's sovereign local brain. You run offline. You know his vault schema.
+    return f"""You are Overseer, Sam's personal AI assistant. Sam is the person talking to you — you are not Sam.
 
-IDENTITY:
-- Sam Charles, 21, Capitol Hill Seattle. Founder: Orinadus + Mad House.
-- You are always next to him in a terminal. You watch. You remember. You act.
+Sam Charles, 21, Capitol Hill Seattle. Founder of Orinadus (builds Urchin) and Mad House (agents, tools).
+You have full access to Sam's vault — his second brain: notes, calendar, health, finance, projects, people.
 
-RULES:
-- Never invent or infer facts. Only state what is in the vault.
-- If you don't know something, say so and offer to search.
-- Responses are 1-3 sentences unless Sam asks for more.
-- No filler. No "Certainly!". No "I've noted that".
-- If a date is missing and it matters, ask exactly one question.
-- Casual check-ins: respond briefly without searching the vault.
+TOOL PROTOCOL:
+Call tools by outputting this exact format on its own line (nothing before @@TOOL@@):
+@@TOOL@@{{"t":"tool_name","key":"value"}}
 
-WHAT YOU DO:
-- Sam talks. You listen. You route information to the right vault partition.
-- Calendar events → write_calendar_event (appears in Obsidian Full Calendar)
-- Health data → write_health_daily (appears in Obsidian Health dashboard)
-- Places visited → write_place_visit (appears as pins in Map View)
-- Financial transactions → write_finance_transaction (appears in Finance dashboard)
-- Todos and tasks → write_todo (uses Obsidian Tasks syntax with due dates)
-- People and relationships → wiki/personal/people/NAME.md + memory/facts/people.md
-- Movies, books, articles → wiki/personal/[movies|books|articles].md (append row)
-- Knowledge / links → wiki/knowledge/[slug].md (create stub, tag [EMERGING])
-- Project updates → wiki/madhouse/ or wiki/orinadus/ (read first, then update)
-- Anything ambiguous → read wiki/_index.md to find the right page
+Examples:
+@@TOOL@@{{"t":"write_calendar_event","date":"2026-05-25","title":"Meeting with Armond","time":"10:00","duration_mins":120,"location":"621 12th Ave E, Seattle WA"}}
+@@TOOL@@{{"t":"write_todo","task":"Call dentist","due_date":"2026-05-25"}}
+@@TOOL@@{{"t":"vault_read","path":"wiki/personal/people/alex.md"}}
+@@TOOL@@{{"t":"vault_search","query":"Armond"}}
+@@TOOL@@{{"t":"vault_write","path":"wiki/personal/people/alex.md","content":"# Alex\n..."}}
 
-NO DRIFT — before every vault_write:
-1. vault_read the target page and merge — never blindly overwrite
-2. Correct frontmatter partition and tags per VAULT.md schema
-3. Append to wiki/_log.md: [YYYY-MM-DD] conversation | <summary> | <pages touched>
+Rules:
+- Full JSON on that single line, starting exactly with @@TOOL@@ — no leading spaces
+- No announcement before calling — just output the @@TOOL@@ line, then confirm briefly after
+- Call immediately when Sam tells you: meeting/event → write_calendar_event, task → write_todo, health data → write_health_daily, purchase → write_finance_transaction, person info → vault_write (read first), project update → vault_write (read first)
+- When unsure if something is already recorded: vault_search first
 
-VAULT PARTITIONS:
-- orinadus: Urchin, Sleipnir, platform architecture
-- madhouse: Chopsticks, agents, projects, brand
-- personal: goals, relationships, identity, media, tracking
-- finance: transactions, budgets, accounts
-- health: daily metrics, sleep, fitness
-- calendar: events, appointments
-- places: location history, visits
-- knowledge: research, learnings
-- systems: infrastructure, tooling
+VAULT RULES:
+- Before vault_write: always call vault_read first to merge, never overwrite cold.
+- vault_search before writing new knowledge pages.
 
-SKILLS (read skill file before complex tasks):{f'''
-{skills}''' if skills else ' (none loaded)'}
+VOICE:
+- Short. 1-3 sentences unless Sam asks for more.
+- No filler phrases. No "Certainly!" or "I've noted that". Just talk.
+- Casual input gets casual response. Don't search the vault for "whatsup".
 
-CURRENT FACTS:
+CONTEXT (when Sam asks about activity or history):
+- sleipnir_query: what Sam was working on recently
+- vault_search: search the vault
+- vault_read: read a specific page
+
+FACTS (from memory):
 {facts}
-{activity}
+
 Today: {now_str}"""
 
 
@@ -625,230 +727,6 @@ def save_thread(thread_id: str, history: list[dict]) -> None:
         pass
 
 
-# ─── entity extraction (smart routing) ───────────────────────────────────────
-
-async def extract_entities(text: str) -> dict:
-    if len(text.split()) < 5 or _SKIP_EXTRACTION_RE.match(text):
-        return {"entities": {}, "vault_writes": [], "skipped": True}
-
-    tz = ZoneInfo(USER_TIMEZONE)
-    local_now = datetime.now(tz)
-    today = local_now.strftime("%Y-%m-%d")
-    local_dt = local_now.strftime("%Y-%m-%dT%H:%M:%S%z")
-
-    prompt = f"""Extract trackable entities from Sam's message. Sam is in Seattle (America/Los_Angeles).
-Current local datetime: {local_dt}
-
-Return ONLY valid JSON:
-{{
-  "people": [{{"name": "string", "relation": "string", "facts": ["string"]}}],
-  "calendar_events": [{{"title": "string", "date": "YYYY-MM-DD", "time": "HH:MM", "duration_mins": 60, "location": "", "attendees": [], "notes": ""}}],
-  "todos": [{{"task": "string", "due_date": "YYYY-MM-DD or empty", "person": "string or null", "priority": "normal"}}],
-  "locations": [{{"name": "string", "city": "string", "duration_mins": 0, "notes": ""}}],
-  "health": [{{"steps": 0, "sleep_hours": 0.0, "weight_kg": 0.0, "energy": "", "notes": ""}}],
-  "transactions": [{{"amount": 0.0, "merchant": "string", "category": "other", "account": "checking", "notes": ""}}],
-  "facts": [{{"category": "preference|recurring|personal", "content": "string"}}],
-  "books": [{{"title": "string", "author": "string or null", "context": "string"}}],
-  "movies": [{{"title": "string", "year": "string or null", "context": "string"}}],
-  "articles": [{{"title": "string", "url": "string or null"}}],
-  "knowledge_domains": [{{"domain": "string", "context": "string"}}]
-}}
-
-Rules:
-- Only extract what is explicitly stated. Never infer.
-- Interpret relative dates relative to {local_dt}.
-- Empty arrays for categories with nothing to extract.
-
-Text: {text}"""
-
-    messages = [{"role": "user", "content": prompt}]
-    try:
-        response = await ollama_chat(messages)
-        raw = response["content"]
-        start = raw.find("{")
-        end = raw.rfind("}") + 1
-        entities = json.loads(raw[start:end])
-    except Exception as e:
-        return {"error": str(e), "vault_writes": []}
-
-    vault_writes: list[str] = []
-
-    # Calendar events
-    for event in entities.get("calendar_events", []):
-        if not event.get("title"):
-            continue
-        result = write_calendar_event(
-            date=event.get("date") or today,
-            title=event["title"],
-            time=event.get("time") or "",
-            duration_mins=event.get("duration_mins") or 60,
-            location=event.get("location") or "",
-            attendees=event.get("attendees") or [],
-            notes=event.get("notes") or "",
-        )
-        vault_writes.append(result)
-
-    # Health
-    for h in entities.get("health", []):
-        if any(h.get(k) for k in ("steps", "sleep_hours", "weight_kg", "energy")):
-            result = write_health_daily(
-                date=today,
-                steps=h.get("steps") or 0,
-                sleep_hours=h.get("sleep_hours") or 0.0,
-                weight_kg=h.get("weight_kg") or 0.0,
-                energy=h.get("energy") or "",
-                notes=h.get("notes") or "",
-            )
-            vault_writes.append(result)
-
-    # Transactions
-    for tx in entities.get("transactions", []):
-        if tx.get("merchant") and tx.get("amount"):
-            result = write_finance_transaction(
-                date=today,
-                amount=tx["amount"],
-                merchant=tx["merchant"],
-                category=tx.get("category") or "other",
-                account=tx.get("account") or "checking",
-                notes=tx.get("notes") or "",
-            )
-            vault_writes.append(result)
-
-    # Todos
-    for todo in entities.get("todos", []):
-        if todo.get("task"):
-            result = write_todo(
-                task=todo["task"],
-                due_date=todo.get("due_date") or "",
-                person=todo.get("person") or "",
-                priority=todo.get("priority") or "normal",
-            )
-            vault_writes.append(result)
-
-    # People
-    for person in entities.get("people", []):
-        name = (person.get("name") or "").strip()
-        if not name:
-            continue
-        slug = name.lower().replace(" ", "-")
-        person_path = f"wiki/personal/people/{slug}.md"
-        existing = vault_read(person_path)
-        facts_lines = "\n".join(f"- {f}" for f in person.get("facts", []))
-        if "[not found:" in existing:
-            content = (
-                f"---\ntitle: {name}\npartition: personal\ntype: person\nname: {name}\n"
-                f"relationship: {person.get('relation', '')}\nbirthday: \nlast_contact: {today}\n"
-                f"sources: [overseer]\ncreated: {today}\nupdated: {today}\ntags: [people, personal]\n---\n\n"
-                f"# {name}\n\n## Facts\n\n{facts_lines}\n\n## Notes\n\n## Interactions\n"
-            )
-        else:
-            content = existing.rstrip() + (f"\n{facts_lines}\n" if facts_lines else "")
-        vault_write(person_path, content, f"overseer: person {name}")
-        vault_writes.append(person_path)
-
-    # Books
-    for book in entities.get("books", []):
-        title = (book.get("title") or "").strip()
-        if not title:
-            continue
-        books_path = "wiki/personal/books.md"
-        existing = vault_read(books_path)
-        author = book.get("author") or "unknown"
-        context = book.get("context") or ""
-        entry = f"| {title} | {author} | {today} | {context} |"
-        if "[not found:" not in existing:
-            if title not in existing:
-                vault_write(books_path, existing.rstrip() + f"\n{entry}\n", f"overseer: book — {title}")
-                vault_writes.append(books_path)
-        else:
-            header = (
-                f"---\ntitle: Books\npartition: personal\nsources: [overseer]\n"
-                f"created: {today}\nupdated: {today}\ntags: [personal, books]\n---\n\n"
-                f"# Books\n\n| Title | Author | Date | Context |\n|---|---|---|---|\n{entry}\n"
-            )
-            vault_write(books_path, header, f"overseer: books.md — {title}")
-            vault_writes.append(books_path)
-
-    # Movies
-    for movie in entities.get("movies", []):
-        title = (movie.get("title") or "").strip()
-        if not title:
-            continue
-        movies_path = "wiki/personal/movies.md"
-        existing = vault_read(movies_path)
-        year = movie.get("year") or ""
-        context = movie.get("context") or ""
-        entry = f"| {title} | {year} | {today} | {context} |"
-        if "[not found:" not in existing:
-            if title not in existing:
-                vault_write(movies_path, existing.rstrip() + f"\n{entry}\n", f"overseer: movie — {title}")
-                vault_writes.append(movies_path)
-        else:
-            header = (
-                f"---\ntitle: Movies\npartition: personal\nsources: [overseer]\n"
-                f"created: {today}\nupdated: {today}\ntags: [personal, movies]\n---\n\n"
-                f"# Movies\n\n| Title | Year | Date | Context |\n|---|---|---|---|\n{entry}\n"
-            )
-            vault_write(movies_path, header, f"overseer: movies.md — {title}")
-            vault_writes.append(movies_path)
-
-    # Knowledge domains
-    for kd in entities.get("knowledge_domains", []):
-        domain = (kd.get("domain") or "").strip()
-        if not domain:
-            continue
-        slug = domain.lower().replace(" ", "-").replace("/", "-")
-        slug = re.sub(r"[^a-z0-9-]", "", slug)
-        kd_path = f"wiki/knowledge/{slug}.md"
-        if "[not found:" in vault_read(kd_path) and "[no results]" in vault_search(domain):
-            content = (
-                f"---\ntitle: {domain}\npartition: knowledge\nsources: [overseer]\n"
-                f"created: {today}\nupdated: {today}\ntags: [knowledge, emerging]\n---\n\n"
-                f"# {domain}\n\n[EMERGING] — first mentioned {today}.\n\n{kd.get('context', '')}\n"
-            )
-            vault_write(kd_path, content, f"overseer: emerging domain — {domain}")
-            vault_writes.append(kd_path)
-
-    # Preferences / personal facts
-    pref_facts = [f for f in entities.get("facts", []) if f.get("category") in ("preference", "personal")]
-    if pref_facts:
-        pref_path = "memory/facts/preferences.md"
-        existing = vault_read(pref_path)
-        lines = "\n".join(f"- {f['content']} (added {today})" for f in pref_facts)
-        if "[not found:" not in existing:
-            vault_write(pref_path, existing.rstrip() + f"\n{lines}\n", "overseer: preferences")
-        else:
-            vault_write(pref_path, f"---\ntags: [memory, facts, preferences]\nupdated: {today}\n---\n\n# Preferences\n\n{lines}\n", "overseer: preferences")
-        vault_writes.append(pref_path)
-
-    # Recurring facts
-    rec_facts = [f for f in entities.get("facts", []) if f.get("category") == "recurring"]
-    if rec_facts:
-        rec_path = "memory/facts/recurring.md"
-        existing = vault_read(rec_path)
-        lines = "\n".join(f"- {f['content']} (added {today})" for f in rec_facts)
-        if "[not found:" not in existing:
-            vault_write(rec_path, existing.rstrip() + f"\n{lines}\n", "overseer: recurring")
-        else:
-            vault_write(rec_path, f"---\ntags: [memory, facts, recurring]\nupdated: {today}\n---\n\n# Recurring\n\n{lines}\n", "overseer: recurring")
-        vault_writes.append(rec_path)
-
-    return {"entities": entities, "vault_writes": vault_writes}
-
-
-def _append_log(summary: str, pages: list[str]) -> None:
-    tz = ZoneInfo(USER_TIMEZONE)
-    today = datetime.now(tz).strftime("%Y-%m-%d")
-    log_path = VAULT_PATH / "wiki" / "_log.md"
-    pages_str = ", ".join(pages[:5]) or "none"
-    entry = f"\n[{today}] conversation | {summary[:80]} | {pages_str}"
-    try:
-        if log_path.exists():
-            log_path.write_text(log_path.read_text().rstrip() + entry + "\n")
-        else:
-            log_path.write_text(f"# Vault Operation Log\n{entry}\n")
-    except Exception:
-        pass
 
 
 # ─── request models ───────────────────────────────────────────────────────────
@@ -856,20 +734,6 @@ def _append_log(summary: str, pages: list[str]) -> None:
 class ChatRequest(BaseModel):
     message: str
     thread_id: str | None = None
-
-
-class TriageRequest(BaseModel):
-    content: str
-    source: str = "inbox"
-
-
-class RememberRequest(BaseModel):
-    fact: str
-    category: str = "preferences"
-
-
-class ExtractRequest(BaseModel):
-    text: str
 
 
 # ─── endpoints ────────────────────────────────────────────────────────────────
@@ -946,22 +810,6 @@ async def chat(req: ChatRequest):
     history.append({"role": "assistant", "content": answer})
     save_thread(thread_id, history)
 
-    if tool_log:
-        _append_log(req.message[:80], tool_log)
-
-    # Update overseer-live.md
-    try:
-        live_path = VAULT_PATH / "memory" / "overseer-live.md"
-        live_path.parent.mkdir(parents=True, exist_ok=True)
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-        tool_lines = "\n".join(f"- `{t}`" for t in tool_log[-5:]) or "*no tool calls*"
-        live_path.write_text(
-            f"---\ntags: [overseer, log]\n---\n\n# Overseer Live\n\n"
-            f"- **{now}** — {OLLAMA_MODEL}\n- {req.message[:80]}\n\n## Tool calls\n\n{tool_lines}\n"
-        )
-    except Exception:
-        pass
-
     return {
         "response": answer,
         "tool_calls": tool_log,
@@ -970,59 +818,123 @@ async def chat(req: ChatRequest):
     }
 
 
-@app.post("/extract")
-async def extract(req: ExtractRequest):
-    result = await extract_entities(req.text)
-    return result
+@app.post("/chat/stream")
+async def chat_stream(req: ChatRequest):
+    thread_id = req.thread_id or "default"
+    history = load_thread(thread_id)
 
+    messages = [{"role": "system", "content": system_prompt()}]
+    messages.extend(history[-20:])
+    messages.append({"role": "user", "content": req.message})
 
-@app.post("/triage")
-async def triage(req: TriageRequest):
-    triage_prompt = f"""Triage this inbox item from source: {req.source}
+    async def generate():
+        tool_log: list[str] = []
+        full_response = ""
+        ctx_opts = {"num_ctx": int(os.environ.get("OLLAMA_CTX", "4096"))}
+        fallback = "http://localhost:11434"
+        urls = [OLLAMA_URL] if OLLAMA_URL == fallback else [OLLAMA_URL, fallback]
+        total_eval_count = 0
+        total_eval_duration = 0
 
-Return ONLY valid JSON:
-{{
-  "tags": ["string"],
-  "destination": "wiki/orinadus|wiki/madhouse|wiki/personal|wiki/systems|wiki/sessions|wiki/personal/people|daily|ignore",
-  "summary": "one sentence",
-  "entities": {{"people": [], "dates": [], "projects": [], "facts": []}}
-}}
+        for _ in range(12):
+            collected_content = ""
+            collected_tool_calls: list = []
+            text_tool_lines: list[str] = []
+            ok = False
 
-Content:
-{req.content[:3000]}"""
+            for url in urls:
+                try:
+                    line_buf = ""
+                    async for content, tcs, stats in _stream_ollama(url, messages, ctx_opts):
+                        if content:
+                            line_buf += content
+                            while "\n" in line_buf:
+                                line, line_buf = line_buf.split("\n", 1)
+                                if line.startswith("@@TOOL@@"):
+                                    text_tool_lines.append(line)
+                                else:
+                                    chunk = line + "\n"
+                                    collected_content += chunk
+                                    yield f"data: {json.dumps({'type': 'chunk', 'content': chunk})}\n\n"
+                        if tcs:
+                            collected_tool_calls.extend(tcs)
+                        if stats:
+                            total_eval_count += stats.get("eval_count", 0)
+                            total_eval_duration += stats.get("eval_duration", 0)
+                    if line_buf:
+                        if line_buf.startswith("@@TOOL@@"):
+                            text_tool_lines.append(line_buf)
+                        else:
+                            collected_content += line_buf
+                            yield f"data: {json.dumps({'type': 'chunk', 'content': line_buf})}\n\n"
+                    ok = True
+                    break
+                except Exception as e:
+                    logging.warning("stream from %s failed: %s", url, e)
 
-    messages = [{"role": "user", "content": triage_prompt}]
-    try:
-        response = await ollama_chat(messages)
-        raw = response["content"]
-        start = raw.find("{")
-        end = raw.rfind("}") + 1
-        return json.loads(raw[start:end])
-    except Exception:
-        return {
-            "tags": ["inbox"],
-            "destination": "wiki/personal",
-            "summary": req.content[:100],
-            "entities": {"people": [], "dates": [], "projects": [], "facts": []},
-        }
+            if not ok:
+                yield f"data: {json.dumps({'type': 'error', 'content': 'ollama unreachable'})}\n\n"
+                return
 
+            for tool_line in text_tool_lines:
+                try:
+                    data = json.loads(tool_line[len("@@TOOL@@"):])
+                    tool_name = data.pop("t", None)
+                    if tool_name and tool_name in TOOLS_MAP:
+                        short_args = ", ".join(f"{k}={repr(v)[:35]}" for k, v in data.items())
+                        tool_log.append(f"{tool_name}({short_args})")
+                        yield f"data: {json.dumps({'type': 'tool', 'name': tool_name, 'args': short_args})}\n\n"
+                        try:
+                            result = TOOLS_MAP[tool_name](**data)
+                        except Exception as e:
+                            result = f"[tool error: {e}]"
+                        preview = str(result)[:80].replace("\n", " ")
+                        yield f"data: {json.dumps({'type': 'tool_done', 'name': tool_name, 'preview': preview})}\n\n"
+                except (json.JSONDecodeError, TypeError, KeyError) as e:
+                    logging.warning("text tool parse error: %s in %r", e, tool_line)
 
-@app.post("/remember")
-async def remember(req: RememberRequest):
-    valid = {"people", "preferences", "recurring"}
-    category = req.category if req.category in valid else "preferences"
-    facts_path = f"memory/facts/{category}.md"
-    existing = vault_read(facts_path)
-    today = datetime.now().strftime("%Y-%m-%d")
-    updated = existing.rstrip() + f"\n- **{req.fact}** (added {today})\n"
-    result = vault_write(facts_path, updated, f"overseer: remember [{category}]")
-    return {"stored": req.fact, "category": category, "path": facts_path, "result": result}
+            full_response += collected_content
 
+            if not collected_tool_calls:
+                break
 
-@app.get("/recall")
-async def recall(q: str = Query(...)):
-    results = vault_search(q)
-    return {"query": q, "results": results}
+            messages.append({"role": "assistant", "content": collected_content, "tool_calls": collected_tool_calls})
+
+            for tc in collected_tool_calls:
+                fn = tc.get("function", {})
+                name = fn.get("name", "")
+                raw_args = fn.get("arguments", {})
+                args = json.loads(raw_args) if isinstance(raw_args, str) else (raw_args or {})
+                short_args = ", ".join(f"{k}={repr(v)[:35]}" for k, v in args.items())
+                tool_log.append(f"{name}({short_args})")
+
+                yield f"data: {json.dumps({'type': 'tool', 'name': name, 'args': short_args})}\n\n"
+
+                tool_fn = TOOLS_MAP.get(name)
+                if tool_fn:
+                    try:
+                        result = tool_fn(**args)
+                    except Exception as e:
+                        result = f"[tool error: {e}]"
+                else:
+                    result = f"[unknown tool: {name}]"
+
+                preview = str(result)[:80].replace("\n", " ")
+                yield f"data: {json.dumps({'type': 'tool_done', 'name': name, 'preview': preview})}\n\n"
+
+                tool_msg: dict = {"role": "tool", "content": str(result)[:8000]}
+                if "id" in tc:
+                    tool_msg["tool_call_id"] = tc["id"]
+                messages.append(tool_msg)
+
+        history.append({"role": "user", "content": req.message})
+        history.append({"role": "assistant", "content": full_response})
+        save_thread(thread_id, history)
+
+        tps = round(total_eval_count / total_eval_duration * 1e9, 1) if total_eval_duration > 0 else 0.0
+        yield f"data: {json.dumps({'type': 'done', 'model': OLLAMA_MODEL, 'tool_calls': tool_log, 'tokens': total_eval_count, 'tps': tps})}\n\n"
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
 
 
 @app.get("/threads/{thread_id}")
@@ -1039,30 +951,6 @@ async def clear_thread(thread_id: str):
     if path.exists():
         path.unlink()
     return {"cleared": thread_id}
-
-
-@app.get("/activity")
-async def activity(hours: int = 24, source: str | None = None):
-    result = sleipnir_query(hours=hours, source=source)
-    return {"hours": hours, "source": source, "activity": result}
-
-
-@app.get("/logs")
-async def logs():
-    async def gen():
-        log_path = VAULT_PATH / "memory" / "overseer-live.md"
-        last_mtime = 0.0
-        for _ in range(120):
-            try:
-                mtime = log_path.stat().st_mtime
-                if mtime != last_mtime:
-                    last_mtime = mtime
-                    content = log_path.read_text()
-                    yield f"data: {json.dumps({'content': content})}\n\n"
-            except Exception:
-                pass
-            await asyncio.sleep(2)
-    return StreamingResponse(gen(), media_type="text/event-stream")
 
 
 # ─── gateway node protocol ────────────────────────────────────────────────────
@@ -1091,78 +979,9 @@ async def infer_chat(req: InferRequest, request: Request):
         import traceback
         return {"content": f"[node error: {e}]", "tool_calls": [], "model": OLLAMA_MODEL}
 
-    if tool_log:
-        _append_log(req.message[:80], tool_log)
-
     return {"content": answer, "tool_calls": tool_log, "model": OLLAMA_MODEL}
-
-
-# ─── gateway registration ─────────────────────────────────────────────────────
-
-async def _register_with_gateway() -> None:
-    if not GATEWAY_URL or not NODE_INFERENCE_URL:
-        return
-
-    # Discover available Ollama models
-    models: list[str] = []
-    try:
-        async with httpx.AsyncClient(timeout=5) as client:
-            r = await client.get(f"{OLLAMA_URL}/api/tags")
-            if r.is_success:
-                models = [m["name"] for m in r.json().get("models", [])]
-    except Exception:
-        pass
-
-    payload = {
-        "node_id": NODE_ID,
-        "hostname": socket.gethostname(),
-        "inference_url": NODE_INFERENCE_URL,
-        "secret": GATEWAY_NODE_SECRET,
-        "capabilities": ["chat"],
-        "models": models,
-        "has_vault": True,
-    }
-
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.post(f"{GATEWAY_URL}/nodes/register", json=payload)
-            if r.is_success:
-                logging.info("Registered with gateway: %s", GATEWAY_URL)
-            else:
-                logging.warning("Gateway registration failed: %s", r.text[:200])
-    except Exception as e:
-        logging.warning("Gateway registration error: %s", e)
-
-
-async def _heartbeat_loop() -> None:
-    if not GATEWAY_URL or not NODE_INFERENCE_URL:
-        return
-    while True:
-        await asyncio.sleep(30)
-        try:
-            async with httpx.AsyncClient(timeout=5) as client:
-                await client.post(
-                    f"{GATEWAY_URL}/nodes/heartbeat",
-                    json={"node_id": NODE_ID, "secret": GATEWAY_NODE_SECRET},
-                )
-        except Exception:
-            pass
-
-
-async def _warmup_model() -> None:
-    """Load the model into Ollama's memory so the first user request is fast."""
-    try:
-        async with httpx.AsyncClient(timeout=180) as client:
-            await client.post(
-                f"{OLLAMA_URL}/api/generate",
-                json={"model": OLLAMA_MODEL, "prompt": "", "keep_alive": "5m"},
-            )
-    except Exception:
-        pass
 
 
 @app.on_event("startup")
 async def startup():
-    await _register_with_gateway()
-    asyncio.create_task(_heartbeat_loop())
-    asyncio.create_task(_warmup_model())
+    pass  # Ollama loads model on first request
