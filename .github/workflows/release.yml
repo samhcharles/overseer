@@ -1,0 +1,52 @@
+name: release
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - { os: ubuntu-latest,  goos: linux,   goarch: amd64, ext: '' }
+          - { os: ubuntu-latest,  goos: linux,   goarch: arm64, ext: '' }
+          - { os: ubuntu-latest,  goos: darwin,  goarch: amd64, ext: '' }
+          - { os: ubuntu-latest,  goos: darwin,  goarch: arm64, ext: '' }
+          - { os: ubuntu-latest,  goos: windows, goarch: amd64, ext: '.exe' }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: stable }
+      - name: Build
+        working-directory: tui-go
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: go build -trimpath -ldflags="-s -w" -o "overseer-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" .
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: tui-go/overseer-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
+
+  publish-npm:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Sync version from tag
+        working-directory: tui-go/npm
+        run: npm version "${GITHUB_REF_NAME#v}" --no-git-tag-version --allow-same-version
+      - name: Publish
+        working-directory: tui-go/npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public
