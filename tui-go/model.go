@@ -255,13 +255,14 @@ func (m model) handleChunk(msg chunkMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if msg.content != "" {
-		// Defensive: strip any @@TOOL@@{...} markers that slipped through the
-		// server-side filter. The model sometimes emits them mid-sentence.
 		clean := stripToolMarkers(msg.content)
 		if clean != "" {
 			if n := len(m.messages); n > 0 && m.messages[n-1].role == "assistant" {
 				m.messages[n-1].content += clean
 			}
+			// Auto-scroll back to bottom when new content streams in so the
+			// user always sees the latest unless they explicitly scrolled.
+			m.scrollOffset = 0
 		}
 		return m, readChunkCmd(m.streamScanner, m.streamBody)
 	}
@@ -310,31 +311,63 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleStartKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if msg.Type == tea.KeyCtrlC {
+	if msg.Type == tea.KeyCtrlC || (msg.Type == tea.KeyRunes && msg.String() == "q") {
 		return m, tea.Quit
-	}
-	if msg.Type == tea.KeyEnter {
-		if len(m.sessions) > 0 {
-			return m, loadThreadCmd(m.apiURL, m.sessions[0].id)
-		}
 	}
 	if msg.Type == tea.KeyRunes {
 		switch msg.String() {
+		case "r", "R":
+			if len(m.sessions) > 0 {
+				return m, loadThreadCmd(m.apiURL, m.sessions[0].id)
+			}
+			return m, nil
 		case "l", "L":
 			if len(m.sessions) > 0 {
 				m.view = sessionView
 				m.sessionCursor = 0
 				return m, nil
 			}
+			return m, nil
 		case "?":
 			m.prevView = startView
 			m.view = helpView
 			return m, nil
 		}
 	}
-	m.view = chatView
-	m.messages = []chatMsg{{role: "assistant", content: "ready. what do you need?", ts: time.Now()}}
+	// Enter → new session. Any other key (n, space, etc.) also starts a new session.
+	if msg.Type == tea.KeyEnter || msg.Type == tea.KeySpace || msg.Type == tea.KeyRunes {
+		return m.startFreshSession()
+	}
 	return m, nil
+}
+
+func (m model) startFreshSession() (tea.Model, tea.Cmd) {
+	m.view = chatView
+	m.threadID = genID()
+	greeting := m.welcomeMessage()
+	m.messages = []chatMsg{{role: "assistant", content: greeting, ts: time.Now()}}
+	m.turnCount = 0
+	m.tokensTotal = 0
+	m.tps = 0
+	m.scrollOffset = 0
+	m.activityLog = nil
+	return m, nil
+}
+
+func (m model) welcomeMessage() string {
+	// First-run onboarding when the user has no saved sessions.
+	if len(m.sessions) == 0 {
+		var b strings.Builder
+		b.WriteString("Welcome. I'm **Overseer** — your second brain, running on your machine.\n\n")
+		b.WriteString("Try one of these to see what I can do:\n\n")
+		b.WriteString("- `who am i?` — I'll tell you what I know about you from your vault\n")
+		b.WriteString("- `save a bookmark: https://...` — quick capture to your vault\n")
+		b.WriteString("- `i met someone called X today` — I'll propose a vault entry\n")
+		b.WriteString("- `/help` — full keyboard + command reference\n\n")
+		b.WriteString("Anything I save lives in `~/vault` as plain markdown — yours to read, edit, sync.")
+		return b.String()
+	}
+	return "ready. what do you need?"
 }
 
 func (m model) handleSessionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -415,7 +448,7 @@ func (m model) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, loadSessionsCmd(m.stateDir)
 
 	case tea.KeyPgUp:
-		m.scrollOffset += 10
+		m.scrollOffset = clampScroll(m.scrollOffset+10, m.maxScroll())
 		return m, nil
 
 	case tea.KeyPgDown:
@@ -460,21 +493,25 @@ func (m model) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.isInputEmpty() && !m.loading {
 		switch msg.Type {
 		case tea.KeyUp:
-			if len(m.inputHistory) == 0 {
+			if len(m.inputHistory) > 0 {
+				if m.historyCursor == -1 {
+					m.historySaved = m.input.Value()
+					m.historyCursor = len(m.inputHistory) - 1
+				} else if m.historyCursor > 0 {
+					m.historyCursor--
+				}
+				m.input.SetValue(m.inputHistory[m.historyCursor])
+				m.input.CursorEnd()
 				return m, nil
 			}
-			if m.historyCursor == -1 {
-				m.historySaved = m.input.Value()
-				m.historyCursor = len(m.inputHistory) - 1
-			} else if m.historyCursor > 0 {
-				m.historyCursor--
-			}
-			m.input.SetValue(m.inputHistory[m.historyCursor])
-			m.input.CursorEnd()
+			// no history → scroll instead
+			m.scrollOffset = clampScroll(m.scrollOffset+1, m.maxScroll())
 			return m, nil
 		case tea.KeyDown:
 			if m.historyCursor == -1 {
-				m.scrollIfPossible(-1)
+				if m.scrollOffset > 0 {
+					m.scrollOffset--
+				}
 				return m, nil
 			}
 			if m.historyCursor < len(m.inputHistory)-1 {
@@ -492,10 +529,9 @@ func (m model) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	// Scroll up/down when input has content (treat as scroll)
-	if msg.Type == tea.KeyUp && m.scrollOffset >= 0 {
-		// only treat as scroll when cursor is on first line of textarea
+	if msg.Type == tea.KeyUp {
 		if m.input.Line() == 0 && len(m.input.Value()) > 0 {
-			m.scrollOffset++
+			m.scrollOffset = clampScroll(m.scrollOffset+1, m.maxScroll())
 			return m, nil
 		}
 	}
@@ -572,6 +608,58 @@ func (m model) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.historySaved = ""
 	}
 	return m, cmd
+}
+
+// maxScroll returns the maximum useful scrollOffset for the current message
+// buffer at the current terminal width. Beyond this, the top message is
+// already visible and further scroll does nothing meaningful.
+func (m model) maxScroll() int {
+	lw := m.leftWidth()
+	bodyH := m.height - 2
+	if bodyH < 4 {
+		bodyH = 4
+	}
+	paletteLines := m.renderPalette(lw)
+	paletteH := len(paletteLines)
+	inputBlock := m.renderInput()
+	inputH := len(strings.Split(inputBlock, "\n"))
+	if inputH < 1 {
+		inputH = 1
+	}
+	msgAreaH := bodyH - paletteH - 1 - inputH
+	if msgAreaH < 1 {
+		msgAreaH = 1
+	}
+	// Build the full rendered chat (without slicing) to measure total lines.
+	total := 0
+	for _, msg := range m.messages {
+		total++ // label line
+		var body string
+		if msg.role == "assistant" {
+			body = renderMarkdown(msg.content, lw-2)
+		} else {
+			body = msg.content
+		}
+		total += strings.Count(body, "\n") + 1
+		total++ // trailing blank
+	}
+	if m.lastErr != "" {
+		total += 2
+	}
+	if total <= msgAreaH {
+		return 0
+	}
+	return total - msgAreaH
+}
+
+func clampScroll(v, max int) int {
+	if v < 0 {
+		return 0
+	}
+	if v > max {
+		return max
+	}
+	return v
 }
 
 func (m *model) scrollIfPossible(delta int) {
@@ -897,7 +985,7 @@ func (m model) renderStart(w, h int) string {
 	}
 
 	var lines []string
-	contentH := len(spriteLines) + 8
+	contentH := len(spriteLines) + 10
 	topPad := (h - contentH) / 2
 	if topPad < 0 {
 		topPad = 0
@@ -906,13 +994,13 @@ func (m model) renderStart(w, h int) string {
 		lines = append(lines, "")
 	}
 
-	// Sprite with the eye accent-coloured
+	// Sprite with accent-coloured helmet and wordmark
 	for i, sl := range spriteLines {
 		styled := sl
 		switch i {
-		case 1, 2, 3: // helmet outline rows
+		case 1, 2, 3:
 			styled = lipgloss.NewStyle().Foreground(colAccent).Render(sl)
-		case 6: // wordmark
+		case 6:
 			styled = titleStyle.Render(sl)
 		default:
 			styled = sepStyle.Render(sl)
@@ -925,7 +1013,7 @@ func (m model) renderStart(w, h int) string {
 	lines = append(lines, "")
 
 	dot := statusDot(m.apiOK)
-	modelStr := "connecting..."
+	modelStr := "connecting…"
 	if m.apiModel != "" {
 		modelStr = m.apiModel
 	}
@@ -933,28 +1021,36 @@ func (m model) renderStart(w, h int) string {
 	if m.apiOK {
 		state = "online"
 	}
-	lines = append(lines, center(dot+"  "+bodyStyle.Render(state)+"  "+hintStyle.Render(modelStr)))
+	lines = append(lines, center(dot+"  "+bodyStyle.Render(state)+"  "+hintStyle.Render("· "+modelStr)))
 	lines = append(lines, "")
 
+	// Explicit action keys — every option is named.
 	if len(m.sessions) > 0 {
 		last := m.sessions[0]
 		preview := last.preview
 		if preview == "" {
 			preview = last.id
 		}
-		lines = append(lines, center(hintStyle.Render(fmt.Sprintf("%d session(s) saved", len(m.sessions)))))
-		lines = append(lines, center(hintStyle.Render("last: "+trunc(preview, 48))))
+		lines = append(lines, center(hintStyle.Render(fmt.Sprintf("%d saved session(s) · last: %s", len(m.sessions), trunc(preview, 40)))))
 		lines = append(lines, "")
-		lines = append(lines, center(badgeStyle.Render("enter")+hintStyle.Render(" → resume   ")+badgeStyle.Render("l")+hintStyle.Render(" → list   ")+badgeStyle.Render("?")+hintStyle.Render(" → help")))
-		lines = append(lines, center(badgeStyle.Render("any other key")+hintStyle.Render(" → new session")))
+		lines = append(lines, center(actionLine("enter", "new session")))
+		lines = append(lines, center(actionLine("r", "resume last")))
+		lines = append(lines, center(actionLine("l", "list all sessions")))
 	} else {
-		lines = append(lines, center(hintStyle.Render("press any key to start    ? for help")))
+		lines = append(lines, center(hintStyle.Render("first time here? press enter and i'll show you around.")))
+		lines = append(lines, "")
+		lines = append(lines, center(actionLine("enter", "start your first session")))
 	}
+	lines = append(lines, center(actionLine("?", "help")+"   "+actionLine("q", "quit")))
 
 	for len(lines) < h {
 		lines = append(lines, "")
 	}
 	return strings.Join(lines[:h], "\n")
+}
+
+func actionLine(key, label string) string {
+	return badgeStyle.Render(key) + hintStyle.Render(" → "+label)
 }
 
 // ── Session list ──────────────────────────────────────────────────────────────

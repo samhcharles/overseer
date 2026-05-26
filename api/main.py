@@ -8,6 +8,12 @@ import json
 import logging
 import os
 import re
+
+
+def trunc_str(s: str, n: int) -> str:
+    """Short helper: clip a string to n chars with an ellipsis."""
+    s = (s or "").replace("\n", " ")
+    return s if len(s) <= n else s[: n - 1] + "…"
 import sqlite3
 import subprocess
 import threading
@@ -1387,21 +1393,57 @@ async def chat_stream(req: ChatRequest):
                 return
 
             for tool_line in text_tool_lines:
+                raw = tool_line[len("@@TOOL@@"):].strip()
+                tool_name = None
+                data: dict | None = None
+                parse_err: str | None = None
+
+                # Try strict JSON first
                 try:
-                    data = json.loads(tool_line[len("@@TOOL@@"):])
-                    tool_name = data.pop("t", None)
-                    if tool_name and tool_name in TOOLS_MAP:
-                        short_args = ", ".join(f"{k}={repr(v)[:35]}" for k, v in data.items())
-                        tool_log.append(f"{tool_name}({short_args})")
-                        yield f"data: {json.dumps({'type': 'tool', 'name': tool_name, 'args': short_args})}\n\n"
-                        try:
-                            result = TOOLS_MAP[tool_name](**data)
-                        except Exception as e:
-                            result = f"[tool error: {e}]"
-                        preview = str(result)[:80].replace("\n", " ")
-                        yield f"data: {json.dumps({'type': 'tool_done', 'name': tool_name, 'preview': preview})}\n\n"
-                except (json.JSONDecodeError, TypeError, KeyError) as e:
-                    logging.warning("text tool parse error: %s in %r", e, tool_line)
+                    data = json.loads(raw)
+                    if isinstance(data, dict):
+                        tool_name = data.pop("t", None)
+                except (json.JSONDecodeError, TypeError):
+                    parse_err = "invalid json"
+
+                # Tolerant fallback: small models sometimes emit positional-style
+                # `{"tool_name","arg1","arg2"}` instead of `{"t":"name","key":"val"}`.
+                # Try to recover the tool name and treat remaining strings as a
+                # single `query` argument so vault_search etc. still work.
+                if data is None or not tool_name:
+                    try:
+                        tokens = re.findall(r'"([^"]*)"', raw)
+                        if tokens:
+                            candidate = tokens[0]
+                            if candidate in TOOLS_MAP:
+                                tool_name = candidate
+                                data = {}
+                                if len(tokens) > 1:
+                                    data["query"] = " ".join(tokens[1:])
+                                parse_err = None
+                    except Exception as e:
+                        parse_err = parse_err or str(e)
+
+                if tool_name and tool_name in TOOLS_MAP and data is not None:
+                    short_args = ", ".join(f"{k}={repr(v)[:35]}" for k, v in data.items())
+                    tool_log.append(f"{tool_name}({short_args})")
+                    yield f"data: {json.dumps({'type': 'tool', 'name': tool_name, 'args': short_args})}\n\n"
+                    try:
+                        result = TOOLS_MAP[tool_name](**data)
+                    except Exception as e:
+                        result = f"[tool error: {e}]"
+                    preview = str(result)[:80].replace("\n", " ")
+                    yield f"data: {json.dumps({'type': 'tool_done', 'name': tool_name, 'preview': preview})}\n\n"
+                else:
+                    # Even malformed attempts get surfaced so the user sees
+                    # the model TRIED to call something — better than silence.
+                    name = tool_name or "(unparseable)"
+                    err = f"malformed call: {parse_err or 'unknown tool'}"
+                    short_args = trunc_str(raw, 70)
+                    tool_log.append(f"{name}({short_args})")
+                    yield f"data: {json.dumps({'type': 'tool', 'name': name, 'args': short_args})}\n\n"
+                    yield f"data: {json.dumps({'type': 'tool_done', 'name': name, 'preview': 'error: ' + err})}\n\n"
+                    logging.warning("text tool parse error: %s in %r", parse_err, tool_line)
 
             full_response += collected_content
 
