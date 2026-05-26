@@ -575,7 +575,7 @@ func (m model) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if text == "" {
 			return m, nil
 		}
-		m.input.Reset()
+		m.resetInput()
 		m.historyCursor = -1
 		m.historySaved = ""
 		m.inputHistory = appendInputHistory(m.inputHistory, text)
@@ -701,6 +701,14 @@ func (m model) isInputEmpty() bool {
 	return strings.TrimSpace(m.input.Value()) == ""
 }
 
+// resetInput wipes the textarea AND restores height to 1. bubbles/textarea's
+// Reset() keeps the previously-set Height, so without this the input area
+// stays multi-line after the user has ever pressed alt+enter.
+func (m *model) resetInput() {
+	m.input.Reset()
+	m.input.SetHeight(1)
+}
+
 func (m model) cancelStream() (tea.Model, tea.Cmd) {
 	m.loading = false
 	if m.streamBody != nil {
@@ -765,7 +773,7 @@ func (m model) handleSlashKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else {
 			cmdLine = sel.name
 		}
-		m.input.Reset()
+		m.resetInput()
 		m.slashOpen = false
 		m.slashMatches = nil
 		m.historyCursor = -1
@@ -932,7 +940,7 @@ func (m model) resetThread() (tea.Model, tea.Cmd) {
 	m.scrollOffset = 0
 	m.turnCount = 0
 	m.lastErr = ""
-	m.input.Reset()
+	m.resetInput()
 	return m, nil
 }
 
