@@ -1162,14 +1162,10 @@ func (m model) renderHelp(w, h int) string {
 	}
 
 	lines = append(lines, "")
-	lines = append(lines, asstLabelStyle.Render("shift+enter for newline"))
-	lines = append(lines, "  "+hintStyle.Render("most terminals can't distinguish shift+enter from enter."))
-	lines = append(lines, "  "+hintStyle.Render("alt+enter and ctrl+j always work. to make shift+enter"))
-	lines = append(lines, "  "+hintStyle.Render("send a newline, bind it in your terminal config:"))
-	lines = append(lines, "")
-	lines = append(lines, "  "+badgeStyle.Render("Windows Terminal")+"  "+hintStyle.Render(`{\"keys\":\"shift+enter\",\"command\":{\"action\":\"sendInput\",\"input\":\"\u001b\r\"}}`))
-	lines = append(lines, "  "+badgeStyle.Render("iTerm2")+"            "+hintStyle.Render("Preferences -> Keys -> Shift+Return -> Send Hex 1B 0D"))
-	lines = append(lines, "  "+badgeStyle.Render("WezTerm")+"           "+hintStyle.Render(`SendString("\x1b\r") with mods="SHIFT" on the Enter key`))
+	lines = append(lines, asstLabelStyle.Render("note"))
+	lines = append(lines, "  "+hintStyle.Render("shift+enter works natively on modern terminals via modify-other-keys"))
+	lines = append(lines, "  "+hintStyle.Render("and Kitty CSI-u — enabled on startup. alt+enter / ctrl+j are universal"))
+	lines = append(lines, "  "+hintStyle.Render("fallbacks. for serious multi-line editing, ctrl+g opens $EDITOR."))
 
 	for len(lines) < h {
 		lines = append(lines, "")
