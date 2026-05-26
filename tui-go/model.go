@@ -109,7 +109,6 @@ func newModel(apiURL, stateDir string) model {
 	ta.FocusedStyle.Prompt = lipgloss.NewStyle().Foreground(colAccent).Bold(true)
 	ta.FocusedStyle.Text = lipgloss.NewStyle().Foreground(colBright)
 	ta.FocusedStyle.Placeholder = lipgloss.NewStyle().Foreground(colDim).Italic(true)
-	ta.FocusedStyle.CursorLine = lipgloss.NewStyle()
 	ta.BlurredStyle = ta.FocusedStyle
 	ta.Cursor.Style = lipgloss.NewStyle().Foreground(colAccent)
 	ta.KeyMap.InsertNewline.SetEnabled(false) // we handle Alt+Enter ourselves
@@ -832,10 +831,14 @@ const panelWidth = 28
 func (m model) usePanel() bool { return m.width > 90 }
 
 func (m model) leftWidth() int {
-	if m.usePanel() {
-		return m.width - panelWidth - 1
+	w := m.width
+	if w == 0 {
+		w = 80
 	}
-	return m.width
+	if m.usePanel() {
+		return w - panelWidth - 1
+	}
+	return w
 }
 
 func (m model) inputWidth() int {
@@ -1048,101 +1051,80 @@ func (m model) renderHelp(w, h int) string {
 func (m model) renderMain(w, h int) string {
 	header := m.renderHeader(w)
 	status := m.renderStatus(w)
-	// body lines = h - 2 (header + status)
 	bodyH := h - 2
 	if bodyH < 4 {
 		bodyH = 4
 	}
 
-	paletteLines := m.renderPalette(m.leftWidth())
-	paletteH := len(paletteLines)
-
-	inputH := m.input.Height() + 2 // textarea height + top/bottom border
-	if inputH < 3 {
-		inputH = 3
-	}
-
-	// Chat area: bodyH - (paletteH + inputH)
-	msgAreaH := bodyH - paletteH - inputH
-	if msgAreaH < 2 {
-		msgAreaH = 2
-	}
-
 	lw := m.leftWidth()
 	useP := m.usePanel()
+
+	// Compute section heights inside bodyH.
+	//
+	//   bodyH = msgAreaH + paletteH + 1(sep) + inputH
+	paletteLines := m.renderPalette(lw)
+	paletteH := len(paletteLines)
+
+	inputBlock := m.renderInput()
+	inputLines := strings.Split(inputBlock, "\n")
+	// Drop trailing empty line that some renderers append.
+	for len(inputLines) > 1 && inputLines[len(inputLines)-1] == "" {
+		inputLines = inputLines[:len(inputLines)-1]
+	}
+	inputH := len(inputLines)
+	if inputH < 1 {
+		inputH = 1
+	}
+
+	const sepH = 1
+	msgAreaH := bodyH - paletteH - sepH - inputH
+	if msgAreaH < 1 {
+		msgAreaH = 1
+	}
 
 	chatLines := m.buildChatLines(lw, msgAreaH)
 
 	var panelLines []string
 	if useP {
-		// Panel uses same body height as left side
-		panelLines = m.buildPanelLines(panelWidth, bodyH-inputH)
+		panelLines = m.buildPanelLines(panelWidth, bodyH)
 	}
 
 	var rows []string
+	pRow := 0
+	appendRow := func(left string) {
+		if !useP {
+			rows = append(rows, left)
+			pRow++
+			return
+		}
+		padN := lw - lipgloss.Width(left)
+		if padN < 0 {
+			padN = 0
+		}
+		right := ""
+		if pRow < len(panelLines) {
+			right = panelLines[pRow]
+		}
+		rows = append(rows, left+strings.Repeat(" ", padN)+sepStyle.Render("│ ")+right)
+		pRow++
+	}
+
 	for i := 0; i < msgAreaH; i++ {
 		left := ""
 		if i < len(chatLines) {
 			left = chatLines[i]
 		}
-		if !useP {
-			rows = append(rows, left)
-			continue
-		}
-		padN := lw - lipgloss.Width(left)
-		if padN < 0 {
-			padN = 0
-		}
-		right := ""
-		if i < len(panelLines) {
-			right = panelLines[i]
-		}
-		rows = append(rows, left+strings.Repeat(" ", padN)+sepStyle.Render("│ ")+right)
+		appendRow(left)
+	}
+	for _, pl := range paletteLines {
+		appendRow(pl)
+	}
+	appendRow(sepStyle.Render(strings.Repeat("─", lw)))
+	for _, il := range inputLines {
+		appendRow(il)
 	}
 
-	// Also paint the palette rows alongside the panel (same column structure).
-	for i := 0; i < paletteH; i++ {
-		left := paletteLines[i]
-		if !useP {
-			rows = append(rows, left)
-			continue
-		}
-		padN := lw - lipgloss.Width(left)
-		if padN < 0 {
-			padN = 0
-		}
-		right := ""
-		panelRow := msgAreaH + i
-		if panelRow < len(panelLines) {
-			right = panelLines[panelRow]
-		}
-		rows = append(rows, left+strings.Repeat(" ", padN)+sepStyle.Render("│ ")+right)
-	}
-
-	sep := sepStyle.Render(strings.Repeat("─", w))
-	inputBlock := m.renderInput()
-	inputLines := strings.Split(inputBlock, "\n")
-	for i := 0; i < inputH-1; i++ {
-		var line string
-		if i < len(inputLines) {
-			line = inputLines[i]
-		}
-		if useP {
-			padN := lw - lipgloss.Width(line)
-			if padN < 0 {
-				padN = 0
-			}
-			right := ""
-			panelRow := msgAreaH + paletteH + i
-			if panelRow < len(panelLines) {
-				right = panelLines[panelRow]
-			}
-			line = line + strings.Repeat(" ", padN) + sepStyle.Render("│ ") + right
-		}
-		rows = append(rows, line)
-	}
-
-	return header + "\n" + strings.Join(rows, "\n") + "\n" + sep + "\n" + status
+	return header + "\n" + strings.Join(rows, "\n") + "\n" + status
 }
 
 func (m model) renderHeader(w int) string {
