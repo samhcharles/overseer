@@ -36,6 +36,13 @@ type chatMsg struct {
 	role    string
 	content string
 	ts      time.Time
+
+	// Render cache — glamour is expensive enough that re-rendering every
+	// assistant message on every streaming chunk visibly lags long
+	// conversations. Cache keyed on (content len, width); invalidate by zeroing.
+	cachedView  string
+	cachedFor   int // content length when cached
+	cachedWidth int
 }
 
 type activityEntry struct {
@@ -660,7 +667,13 @@ func (m model) maxScroll() int {
 		total++ // label line
 		var body string
 		if msg.role == "assistant" {
-			body = renderMarkdown(msg.content, lw-2)
+			// Use cache if available; don't populate it here (avoid mutating
+			// through a non-pointer receiver — buildChatLines handles caching).
+			if msg.cachedView != "" && msg.cachedFor == len(msg.content) && msg.cachedWidth == lw-2 {
+				body = msg.cachedView
+			} else {
+				body = renderMarkdown(msg.content, lw-2)
+			}
 		} else {
 			body = msg.content
 		}
@@ -1363,9 +1376,10 @@ func (m model) renderInput() string {
 
 // ── chat rendering ───────────────────────────────────────────────────────────
 
-func (m model) buildChatLines(w, maxLines int) []string {
+func (m *model) buildChatLines(w, maxLines int) []string {
 	var all []string
-	for _, msg := range m.messages {
+	for i := range m.messages {
+		msg := &m.messages[i]
 		var label string
 		ts := msg.ts.Format("15:04")
 		if msg.role == "user" {
@@ -1377,12 +1391,17 @@ func (m model) buildChatLines(w, maxLines int) []string {
 
 		var body string
 		if msg.role == "assistant" {
-			body = renderMarkdown(msg.content, w-2)
+			// Reuse cached glamour output when content + width are unchanged.
+			if msg.cachedView != "" && msg.cachedFor == len(msg.content) && msg.cachedWidth == w-2 {
+				body = msg.cachedView
+			} else {
+				body = renderMarkdown(msg.content, w-2)
+				msg.cachedView = body
+				msg.cachedFor = len(msg.content)
+				msg.cachedWidth = w - 2
+			}
 		} else {
 			body = msg.content
-		}
-		if body == "" {
-			body = ""
 		}
 		for _, line := range strings.Split(body, "\n") {
 			all = append(all, "  "+line)
