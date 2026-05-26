@@ -1,0 +1,9 @@
+# Vault scaffolds — content shipped with the project, not application source
+templates/** linguist-vendored
+
+# Marketing landing page and API dashboards — not application source
+index.html linguist-documentation
+api/*.html linguist-documentation
+
+# Generated lockfiles
+**/package-lock.json linguist-generated

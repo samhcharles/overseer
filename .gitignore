@@ -10,10 +10,6 @@ GEMINI.md
 # Python virtualenv
 .venv/
 
-# TUI build artifacts
-tui/dist/
-tui/node_modules/
-
 # Go TUI binaries
 tui-go/overseer
 tui-go/overseer-tui
