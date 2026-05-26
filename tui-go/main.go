@@ -9,20 +9,22 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// Terminal control sequences used to make Shift+Enter a distinguishable key:
-//   - modify-other-keys level 1 (xterm / Windows Terminal / most modern):
-//       enable:  \x1b[>4;1m
-//       disable: \x1b[>4;0m
-//   - Kitty keyboard protocol (Kitty / WezTerm with kitty-mode / ghostty):
-//       enable:  \x1b[>1u   (push flags onto stack)
-//       disable: \x1b[<u    (pop flags)
+// Terminal control sequence to make Shift+Enter a distinguishable key
+// via xterm's modify-other-keys protocol (level 1). Supported by xterm,
+// Windows Terminal 1.18+, WezTerm, Kitty, Ghostty, iTerm2, and Alacritty.
 //
-// Once enabled, the terminal emits a distinct sequence for Shift+Enter that
-// the input wrapper (see input_wrapper.go) translates to ESC+CR — which
-// Bubble Tea then parses as Alt+Enter, and the model treats as newline.
+// Once enabled, Shift+Enter emits `\x1b[27;2;13~` while plain Enter still
+// emits `\r`. The input wrapper (see input_wrapper.go) translates the
+// shift sequence to ESC+CR, which Bubble Tea parses as Alt+Enter — handled
+// by the model as a newline insert.
+//
+// We deliberately do NOT enable the Kitty keyboard protocol (`\x1b[>1u`)
+// because its "disambiguate" flag makes plain Enter send `\x1b[13u`, which
+// older versions of Bubble Tea don't parse — breaking the most fundamental
+// keystroke in the TUI.
 const (
-	enableShiftEnterDetection  = "\x1b[>4;1m\x1b[>1u"
-	disableShiftEnterDetection = "\x1b[>4;0m\x1b[<u"
+	enableShiftEnterDetection  = "\x1b[>4;1m"
+	disableShiftEnterDetection = "\x1b[>4;0m"
 )
 
 func main() {
