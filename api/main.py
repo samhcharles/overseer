@@ -1326,31 +1326,57 @@ async def chat_stream(req: ChatRequest):
             text_tool_lines: list[str] = []
             ok = False
 
+            # Tool marker may arrive split across chunks; buffer until we know
+            # whether `@@TOOL@@{...}` is complete (balanced braces) or absent.
+            tool_re = re.compile(r"@@TOOL@@(\{[^\n]*?\})", re.DOTALL)
+            partial_marker_re = re.compile(r"@+T?O?O?L?@*\{?[^@\n]*$")
+
             for url in urls:
                 try:
-                    line_buf = ""
+                    pending = ""
+                    flush_safe = ""
+
+                    def split_pending(buf: str) -> tuple[str, str]:
+                        """Return (safe_to_flush, hold_back). Hold back any prefix that
+                        could still grow into a @@TOOL@@{...} marker."""
+                        # Strip complete tool markers anywhere in buf
+                        out_parts: list[str] = []
+                        i = 0
+                        for m in tool_re.finditer(buf):
+                            out_parts.append(buf[i:m.start()])
+                            text_tool_lines.append("@@TOOL@@" + m.group(1))
+                            i = m.end()
+                        rest = buf[i:]
+                        # Find latest position where a partial @@TOOL@@... marker could begin
+                        m2 = partial_marker_re.search(rest)
+                        if m2:
+                            out_parts.append(rest[:m2.start()])
+                            hold = rest[m2.start():]
+                        else:
+                            out_parts.append(rest)
+                            hold = ""
+                        return "".join(out_parts), hold
+
                     async for content, tcs, stats in _stream_ollama(url, messages, ctx_opts):
                         if content:
-                            line_buf += content
-                            while "\n" in line_buf:
-                                line, line_buf = line_buf.split("\n", 1)
-                                if line.startswith("@@TOOL@@"):
-                                    text_tool_lines.append(line)
-                                else:
-                                    chunk = line + "\n"
-                                    collected_content += chunk
-                                    yield f"data: {json.dumps({'type': 'chunk', 'content': chunk})}\n\n"
+                            pending += content
+                            flush_safe, pending = split_pending(pending)
+                            if flush_safe:
+                                collected_content += flush_safe
+                                yield f"data: {json.dumps({'type': 'chunk', 'content': flush_safe})}\n\n"
                         if tcs:
                             collected_tool_calls.extend(tcs)
                         if stats:
                             total_eval_count += stats.get("eval_count", 0)
                             total_eval_duration += stats.get("eval_duration", 0)
-                    if line_buf:
-                        if line_buf.startswith("@@TOOL@@"):
-                            text_tool_lines.append(line_buf)
-                        else:
-                            collected_content += line_buf
-                            yield f"data: {json.dumps({'type': 'chunk', 'content': line_buf})}\n\n"
+                    # End of stream — flush whatever's still pending (must be safe now)
+                    if pending:
+                        flush_safe, leftover = split_pending(pending + "\n")
+                        if flush_safe.rstrip("\n"):
+                            chunk = flush_safe.rstrip("\n")
+                            collected_content += chunk
+                            yield f"data: {json.dumps({'type': 'chunk', 'content': chunk})}\n\n"
+                        _ = leftover  # any unmatched partial marker is dropped (model truncation)
                     ok = True
                     break
                 except Exception as e:

@@ -122,6 +122,29 @@ func readChunkCmd(sc *bufio.Scanner, body io.ReadCloser) tea.Cmd {
 	}
 }
 
+// ── model switch ──────────────────────────────────────────────────────────────
+
+// switchModelCmd PATCHes the API node with a new active model name.
+// The node is expected to expose POST /model { "name": "..." }.
+// Returns a healthMsg (re-runs health check) so the UI updates.
+func switchModelCmd(apiURL, name string) tea.Cmd {
+	return func() tea.Msg {
+		payload, _ := json.Marshal(map[string]string{"name": name})
+		client := &http.Client{Timeout: 5 * time.Second}
+		resp, err := client.Post(apiURL+"/model", "application/json", bytes.NewReader(payload))
+		if err != nil {
+			return chunkMsg{err: fmt.Errorf("model switch failed: %w", err), done: true}
+		}
+		defer resp.Body.Close()
+		var result struct {
+			OK    bool   `json:"ok"`
+			Model string `json:"model"`
+		}
+		json.NewDecoder(resp.Body).Decode(&result)
+		return healthMsg{ok: true, model: result.Model}
+	}
+}
+
 // ── health ────────────────────────────────────────────────────────────────────
 
 func healthCheckCmd(apiURL string) tea.Cmd {

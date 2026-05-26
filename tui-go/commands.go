@@ -69,6 +69,10 @@ var slashCommands = []slashCmd{
 		},
 	},
 	{
+		name: "/model", desc: "show or switch the active Ollama model", usage: "[name]",
+		localAction: "model",
+	},
+	{
 		name: "/new", desc: "start a new thread",
 		localAction: "new",
 	},
@@ -79,6 +83,10 @@ var slashCommands = []slashCmd{
 	{
 		name: "/sessions", desc: "open the session list",
 		localAction: "sessions",
+	},
+	{
+		name: "/theme", desc: "switch colour theme", usage: "[dark|light|term]",
+		localAction: "theme",
 	},
 }
 
