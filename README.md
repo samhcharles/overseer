@@ -1,39 +1,6 @@
 # Overseer
 
-Your personal Jarvis. A local-first AI that lives on your machine, talks to a structured Obsidian vault (your second brain), and grows along with you. Built originally for one person, shared so others can adopt it.
-
-> **Not affiliated with Mad House or Orinadus.** Overseer is a personal tool. It happens to integrate with [Urchin](https://github.com/orinadus-systems/urchin) and [Sleipnir](https://github.com/orinadus-systems/sleipnir) — both standalone Orinadus products — but neither is required.
-
-## What this is
-
-```
-┌─ Ollama (local model) ──────────────┐
-│         dolphin3 / qwen / llama     │
-└──────────────┬──────────────────────┘
-               │
-┌──────────────▼──────────────────────┐
-│ api/         FastAPI node           │
-│              reads + writes ~/vault │
-│              text-based tool calls  │
-└──────────────┬──────────────────────┘
-               │
-┌──────────────▼──────────────────────┐
-│ tui-go/      Bubble Tea TUI         │
-│              single Go binary       │
-└─────────────────────────────────────┘
-
-┌─ ~/vault (your second brain) ───────┐
-│  wiki/                              │
-│    sales/  bookmarks/  reading/     │
-│    journal/  projects/  contacts/   │
-│    travel/  inbox-ideas/            │
-│    inbox-novel/  ← grows new        │
-│    + 9 canonical partitions         │
-│  dashboards/                        │
-│    sales · journal · contacts · …   │
-│  ~ 18 visual surfaces in Obsidian   │
-└─────────────────────────────────────┘
-```
+A local-first AI that lives on your machine, talks to a structured Obsidian vault, and grows with you. Built for one person, shared so others can adopt it.
 
 ## Quickstart
 
@@ -55,52 +22,50 @@ cd ../tui-go && ./build.sh --install
 overseer
 ```
 
-`setup.sh` will:
-- Ask for your vault path (default `~/vault`)
-- Scaffold ~17 partition folders + dashboards + Obsidian community plugin config
-- Initialize the vault as a git repo
-- Ask which LLM provider you want as default (Ollama / Gemini / OpenRouter)
-- Write `.env` and verify Ollama is reachable
+`setup.sh` asks for your vault path, scaffolds ~18 partition folders + dashboards + Obsidian plugin config, initialises the vault as a git repo, and lets you pick your LLM provider (Ollama, Gemini, or OpenRouter).
 
-## How Overseer thinks
+## How it works
 
-- **Truthfulness:** Overseer never invents people, relationships, places, or facts. Every personal claim is tagged `[vault: <path>]`, `[inferred]`, or `[unknown]`. The vault is the source of truth.
-- **Brain growth:** when you mention something new in conversation (a deal, a book, a person, a trip), Overseer either auto-writes it (atomic events) or proposes a write with a diff (entities, relationships).
-- **New lobes:** if you tell Overseer something that doesn't fit any partition, it asks one line: *"I don't have a home for this — parking in inbox-novel/, ok?"* When 3+ similar quarantined items accumulate, Overseer proposes creating a new partition with schema and dashboard.
+Three pieces:
 
-## Key bindings (TUI)
+- **`api/`** — FastAPI node. Reads and writes your vault, runs tool calls, streams responses.
+- **`tui-go/`** — Bubble Tea terminal client. Single Go binary.
+- **`~/vault`** — Your Obsidian vault. The source of truth. Overseer never invents facts; every personal claim is tagged `[vault: <path>]`, `[inferred]`, or `[unknown]`.
+
+The vault starts with ~18 typed partitions (sales, bookmarks, reading, journal, contacts, travel, projects, …). When you mention something that doesn't fit any partition, Overseer parks it in `inbox-novel/`. Once three similar items accumulate, it proposes creating a new partition with schema and dashboard — the brain grows new lobes.
+
+## Key bindings
 
 | key | action |
 |---|---|
 | `enter` | send |
-| `ctrl+j` / `alt+enter` | newline |
-| `esc` | cancel in-flight |
-| `↑ ↓` | scroll messages |
-| `pgup pgdn` | scroll page |
+| `alt+enter` | newline |
+| `/` | open command palette |
+| `esc` | cancel in-flight stream |
+| `↑` | cycle input history / scroll |
 | `ctrl+n` | new thread |
-| `ctrl+l` | list past sessions |
+| `ctrl+l` | session list |
 | `ctrl+c` | quit |
+
+## Slash commands
+
+`/new` `/sessions` `/clear` `/activity` `/journal` `/idea` `/bookmark` `/deal` `/help` `/quit`
 
 ## Config
 
-See [`.env.example`](.env.example). Required: `VAULT_PATH`, `OLLAMA_URL`, `OLLAMA_MODEL`. Everything else has sensible defaults.
+See [`.env.example`](.env.example). Required: `VAULT_PATH`, `OLLAMA_URL`, `OLLAMA_MODEL`.
 
 ## Repo layout
 
-| Dir | Purpose |
+| dir | purpose |
 |---|---|
-| `api/` | FastAPI Overseer node (Python). Exposes `/chat`, `/chat/stream`, `/health`. |
-| `tui-go/` | Bubble Tea TUI (Go). Single-binary terminal client. |
-| `gateway/` | Always-on VPS router that brokers between multiple nodes (optional). |
-| `agents/` | Background brain agents: tagger, linker, yap_processor. |
-| `scripts/` | Utilities: `check-vault-schemas.py`, `novel_pattern_detector.py`, etc. |
-| `templates/` | Vault scaffolds shipped to new users via `setup.sh`. |
-| `workers/` | Cloudflare Worker edge layer (optional). |
-
-## Vault schema
-
-See your scaffolded `<vault>/VAULT.md` for the canonical schema. The short version: every wiki page belongs to exactly one of ~17 partitions, every page has a `sources:` frontmatter field (anti-hallucination), every entity type has a typed writer tool in the Overseer API.
+| `api/` | FastAPI Overseer node |
+| `tui-go/` | Bubble Tea TUI (Go) |
+| `gateway/` | Always-on VPS router (optional) |
+| `agents/` | Background brain agents |
+| `scripts/` | Utilities including novel-pattern detector |
+| `templates/` | Vault scaffolds for new installs |
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE).
