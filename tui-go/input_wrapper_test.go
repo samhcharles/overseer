@@ -96,3 +96,41 @@ func TestShiftEnter_NoFalsePositive(t *testing.T) {
 		t.Fatalf("got %q want %q", got, s)
 	}
 }
+
+func TestShiftEnter_PlainEnterUntouched(t *testing.T) {
+	for _, s := range []string{"\r", "\n", "\r\n", "hi\rworld", "a\rb\rc\rd"} {
+		r := newShiftEnterReader(strings.NewReader(s))
+		got := readAll(r)
+		if !bytes.Equal(got, []byte(s)) {
+			t.Errorf("plain Enter mangled in %q: got %q", s, got)
+		}
+	}
+}
+
+func TestShiftEnter_SmallReadBuffer(t *testing.T) {
+	// Bubble Tea may pass a small buffer; ensure we still translate correctly.
+	in := strings.NewReader("\x1b[27;2;13~")
+	r := newShiftEnterReader(in)
+	// Read 2 bytes at a time
+	var got []byte
+	buf := make([]byte, 2)
+	zeros := 0
+	for {
+		n, err := r.Read(buf)
+		got = append(got, buf[:n]...)
+		if err != nil {
+			break
+		}
+		if n == 0 {
+			zeros++
+			if zeros > 100 {
+				break
+			}
+			continue
+		}
+	}
+	want := []byte("\x1b\r")
+	if !bytes.Equal(got, want) {
+		t.Errorf("small-buffer read mangled output: got %q want %q", got, want)
+	}
+}
