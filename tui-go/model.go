@@ -5,6 +5,8 @@ import (
 	"crypto/rand"
 	"fmt"
 	"io"
+	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 	"time"
@@ -211,6 +213,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
 		return m, cmd
+
+	case editorFinishedMsg:
+		if msg.err != nil {
+			m.lastErr = "editor: " + msg.err.Error()
+			return m, nil
+		}
+		text := strings.TrimRight(msg.text, "\n")
+		m.input.SetValue(text)
+		m.input.CursorEnd()
+		h := strings.Count(text, "\n") + 1
+		if h < 1 {
+			h = 1
+		}
+		if h > 8 {
+			h = 8
+		}
+		m.input.SetHeight(h)
+		return m, nil
 	}
 
 	return m, nil
@@ -466,6 +486,10 @@ func (m model) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.activityLog[i].expanded = !m.activityLog[i].expanded
 		}
 		return m, nil
+
+	case tea.KeyCtrlG:
+		// Open external editor with current input as buffer.
+		return m, openEditorCmd(m.input.Value())
 
 	case tea.KeyCtrlY:
 		// Copy last assistant message to system clipboard
@@ -1107,7 +1131,8 @@ func (m model) renderHelp(w, h int) string {
 
 	keyRows := [][2]string{
 		{"enter", "send"},
-		{"alt+enter / ctrl+j", "newline in input"},
+		{"alt+enter / ctrl+j", "newline (shift+enter — see note below)"},
+		{"ctrl+g", "open $EDITOR for the input buffer (default vim)"},
 		{"esc", "cancel stream (chat) / close (modal)"},
 		{"↑ / ↓", "history (empty input) · scroll (else)"},
 		{"pgup / pgdn", "scroll messages"},
@@ -1135,6 +1160,16 @@ func (m model) renderHelp(w, h int) string {
 		}
 		lines = append(lines, "  "+name+usage+"  "+c.desc)
 	}
+
+	lines = append(lines, "")
+	lines = append(lines, asstLabelStyle.Render("shift+enter for newline"))
+	lines = append(lines, "  "+hintStyle.Render("most terminals can't distinguish shift+enter from enter."))
+	lines = append(lines, "  "+hintStyle.Render("alt+enter and ctrl+j always work. to make shift+enter"))
+	lines = append(lines, "  "+hintStyle.Render("send a newline, bind it in your terminal config:"))
+	lines = append(lines, "")
+	lines = append(lines, "  "+badgeStyle.Render("Windows Terminal")+"  "+hintStyle.Render(`{\"keys\":\"shift+enter\",\"command\":{\"action\":\"sendInput\",\"input\":\"\u001b\r\"}}`))
+	lines = append(lines, "  "+badgeStyle.Render("iTerm2")+"            "+hintStyle.Render("Preferences -> Keys -> Shift+Return -> Send Hex 1B 0D"))
+	lines = append(lines, "  "+badgeStyle.Render("WezTerm")+"           "+hintStyle.Render(`SendString("\x1b\r") with mods="SHIFT" on the Enter key`))
 
 	for len(lines) < h {
 		lines = append(lines, "")
@@ -1544,6 +1579,39 @@ func trunc(s string, max int) string {
 		}
 	}
 	return "~"
+}
+
+// ── external editor ──────────────────────────────────────────────────────────
+
+type editorFinishedMsg struct {
+	text string
+	err  error
+}
+
+// openEditorCmd writes the current input to a tmpfile, launches $EDITOR
+// (default vim), and reads the result back when the editor exits.
+// Bubble Tea suspends the screen during ExecProcess and restores afterwards.
+func openEditorCmd(initial string) tea.Cmd {
+	tmpfile, err := os.CreateTemp("", "overseer-*.md")
+	if err != nil {
+		return func() tea.Msg { return editorFinishedMsg{err: err} }
+	}
+	tmpfile.WriteString(initial)
+	tmpfile.Close()
+
+	editor := os.Getenv("EDITOR")
+	if editor == "" {
+		editor = "vim"
+	}
+	c := exec.Command(editor, tmpfile.Name())
+	return tea.ExecProcess(c, func(err error) tea.Msg {
+		data, readErr := os.ReadFile(tmpfile.Name())
+		os.Remove(tmpfile.Name())
+		if readErr != nil && err == nil {
+			err = readErr
+		}
+		return editorFinishedMsg{text: string(data), err: err}
+	})
 }
 
 // stripToolMarkers removes any leaked @@TOOL@@{...} markers from chunked
