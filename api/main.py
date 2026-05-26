@@ -87,7 +87,7 @@ def list_notes(folder: str) -> str:
     return "\n".join(files) if files else "[empty]"
 
 
-def sleipnir_query(hours: int = 24, source: str | None = None) -> str:
+def vault_inbox_query(hours: int = 24, source: str | None = None) -> str:
     if not SLEIPNIR_DB.exists():
         return "[sleipnir.db not found — Sleipnir may not be running yet]"
     try:
@@ -250,18 +250,228 @@ def update_wiki_page(path: str, section: str, content_to_append: str) -> str:
     return vault_write(path, updated, f"overseer: update {path}")
 
 
+def _slug(text: str, maxlen: int = 40) -> str:
+    s = text.lower()[:maxlen].replace(" ", "-")
+    return re.sub(r"[^a-z0-9-]", "", s) or "untitled"
+
+
+def write_deal(
+    client: str,
+    status: str = "lead",
+    value: float = 0,
+    currency: str = "USD",
+    close_date: str = "",
+    next_action: str = "",
+    notes: str = "",
+) -> str:
+    tz = ZoneInfo(USER_TIMEZONE)
+    today = datetime.now(tz).strftime("%Y-%m-%d")
+    path = f"wiki/sales/deals/{_slug(client)}.md"
+    content = (
+        f"---\ntitle: {client}\npartition: sales\ntype: deal\n"
+        f"client: {client}\nstatus: {status}\nvalue: {value}\ncurrency: {currency}\n"
+        f"opened: {today}\nclose_date: {close_date}\nnext_action: \"{next_action}\"\n"
+        f"sources: [overseer]\ncreated: {today}\nupdated: {today}\ntags: [sales, deal]\n---\n\n"
+        f"# {client}\n\n{notes}\n"
+    )
+    return vault_write(path, content, f"overseer: deal — {client}")
+
+
+def write_lead(name: str, source: str = "", status: str = "cold", notes: str = "") -> str:
+    tz = ZoneInfo(USER_TIMEZONE)
+    today = datetime.now(tz).strftime("%Y-%m-%d")
+    path = f"wiki/sales/leads/{_slug(name)}.md"
+    content = (
+        f"---\ntitle: {name}\npartition: sales\ntype: lead\n"
+        f"source: \"{source}\"\nfirst_contact: {today}\nstatus: {status}\n"
+        f"sources: [overseer]\ncreated: {today}\nupdated: {today}\ntags: [sales, lead]\n---\n\n"
+        f"# {name}\n\n{notes}\n"
+    )
+    return vault_write(path, content, f"overseer: lead — {name}")
+
+
+def write_client(name: str, mrr: float = 0, relationship: str = "", notes: str = "") -> str:
+    tz = ZoneInfo(USER_TIMEZONE)
+    today = datetime.now(tz).strftime("%Y-%m-%d")
+    path = f"wiki/sales/clients/{_slug(name)}.md"
+    content = (
+        f"---\ntitle: {name}\npartition: sales\ntype: client\n"
+        f"since: {today}\nmrr: {mrr}\nrelationship: \"{relationship}\"\n"
+        f"sources: [overseer]\ncreated: {today}\nupdated: {today}\ntags: [sales, client]\n---\n\n"
+        f"# {name}\n\n{notes}\n"
+    )
+    return vault_write(path, content, f"overseer: client — {name}")
+
+
+def write_bookmark(url: str, title: str = "", topic: str = "", source: str = "", summary: str = "", tags: list[str] | None = None) -> str:
+    tz = ZoneInfo(USER_TIMEZONE)
+    today = datetime.now(tz).strftime("%Y-%m-%d")
+    slug = _slug(title or url.replace("https://", "").replace("http://", ""))
+    path = f"wiki/bookmarks/{slug}.md"
+    tag_str = ", ".join(tags or [])
+    content = (
+        f"---\ntitle: {title or url}\npartition: bookmarks\ntype: bookmark\n"
+        f"url: {url}\ntopic: \"{topic}\"\nsource: \"{source}\"\nsummary: \"{summary}\"\n"
+        f"saved: {today}\nsources: [overseer]\ncreated: {today}\nupdated: {today}\n"
+        f"tags: [bookmarks, {tag_str}]\n---\n\n"
+        f"# {title or url}\n\n{url}\n\n{summary}\n"
+    )
+    return vault_write(path, content, f"overseer: bookmark — {title or url[:40]}")
+
+
+def write_reading_item(
+    title: str,
+    medium: str = "book",
+    author: str = "",
+    status: str = "queue",
+    progress_pct: int = 0,
+    notes: str = "",
+) -> str:
+    tz = ZoneInfo(USER_TIMEZONE)
+    today = datetime.now(tz).strftime("%Y-%m-%d")
+    subdir = {"book": "books", "article": "articles", "course": "courses", "podcast": "podcasts"}.get(medium, "books")
+    path = f"wiki/reading/{subdir}/{_slug(title)}.md"
+    content = (
+        f"---\ntitle: {title}\npartition: reading\ntype: reading-item\n"
+        f"medium: {medium}\nstatus: {status}\nauthor: \"{author}\"\n"
+        f"progress_pct: {progress_pct}\nstarted: \nfinished: \n"
+        f"sources: [overseer]\ncreated: {today}\nupdated: {today}\ntags: [reading, {medium}]\n---\n\n"
+        f"# {title}\n\n{notes}\n"
+    )
+    return vault_write(path, content, f"overseer: reading — {title}")
+
+
+def write_journal_entry(
+    date: str = "",
+    mood: int = 0,
+    energy: int = 0,
+    key_events: list[str] | None = None,
+    gratitude: list[str] | None = None,
+    body: str = "",
+) -> str:
+    tz = ZoneInfo(USER_TIMEZONE)
+    if not date:
+        date = datetime.now(tz).strftime("%Y-%m-%d")
+    year, month, _ = date.split("-")
+    path = f"wiki/journal/{year}/{month}/{date}.md"
+    events_str = ", ".join(key_events or [])
+    grat_str = ", ".join(gratitude or [])
+    content = (
+        f"---\ntitle: Journal {date}\npartition: journal\ntype: journal-entry\n"
+        f"date: {date}\nmood: {mood}\nenergy: {energy}\n"
+        f"key_events: [{events_str}]\ngratitude: [{grat_str}]\n"
+        f"sources: [overseer]\ncreated: {date}\nupdated: {date}\ntags: [journal]\n---\n\n"
+        f"# Journal — {date}\n\n{body}\n"
+    )
+    return vault_write(path, content, f"overseer: journal {date}")
+
+
+def write_contact(
+    name: str,
+    org: str = "",
+    role: str = "",
+    relationship: str = "business",
+    email: str = "",
+    phone: str = "",
+    notes: str = "",
+) -> str:
+    tz = ZoneInfo(USER_TIMEZONE)
+    today = datetime.now(tz).strftime("%Y-%m-%d")
+    subdir = {"business": "business", "vendor": "vendors", "supplier": "suppliers"}.get(relationship, "business")
+    path = f"wiki/contacts/{subdir}/{_slug(name)}.md"
+    content = (
+        f"---\ntitle: {name}\npartition: contacts\ntype: contact\n"
+        f"org: \"{org}\"\nrole: \"{role}\"\nrelationship: \"{relationship}\"\n"
+        f"email: \"{email}\"\nphone: \"{phone}\"\nlast_contact: {today}\nnext_touch: \n"
+        f"sources: [overseer]\ncreated: {today}\nupdated: {today}\ntags: [contacts, {relationship}]\n---\n\n"
+        f"# {name}\n\n{notes}\n"
+    )
+    return vault_write(path, content, f"overseer: contact — {name}")
+
+
+def write_idea(text: str, tags: list[str] | None = None) -> str:
+    tz = ZoneInfo(USER_TIMEZONE)
+    now = datetime.now(tz)
+    stamp = now.strftime("%Y-%m-%dT%H%M")
+    path = f"wiki/inbox-ideas/{stamp}-{_slug(text, 30)}.md"
+    tag_str = ", ".join(tags or [])
+    content = (
+        f"---\ntitle: \"{text[:80]}\"\npartition: inbox-ideas\ntype: idea\n"
+        f"captured_at: {now.strftime('%Y-%m-%dT%H:%M')}\ntriaged: false\ntarget_partition: \n"
+        f"sources: [overseer]\ncreated: {now.strftime('%Y-%m-%d')}\nupdated: {now.strftime('%Y-%m-%d')}\n"
+        f"tags: [inbox, ideas, {tag_str}]\n---\n\n"
+        f"{text}\n"
+    )
+    return vault_write(path, content, f"overseer: idea — {text[:40]}")
+
+
+def write_trip(
+    destination: str,
+    start_date: str,
+    end_date: str = "",
+    places: list[str] | None = None,
+    itinerary: str = "",
+    notes: str = "",
+) -> str:
+    tz = ZoneInfo(USER_TIMEZONE)
+    today = datetime.now(tz).strftime("%Y-%m-%d")
+    path = f"wiki/travel/trips/{start_date}-{_slug(destination)}.md"
+    places_str = ", ".join(f"[[wiki/places/{p}]]" for p in (places or []))
+    content = (
+        f"---\ntitle: {destination} ({start_date})\npartition: travel\ntype: trip\n"
+        f"destination: {destination}\nstart_date: {start_date}\nend_date: {end_date or start_date}\n"
+        f"places: [{places_str}]\nitinerary: \"{itinerary[:200]}\"\n"
+        f"sources: [overseer]\ncreated: {today}\nupdated: {today}\ntags: [travel]\n---\n\n"
+        f"# {destination}\n\n{notes}\n"
+    )
+    return vault_write(path, content, f"overseer: trip — {destination}")
+
+
+def quarantine_capture(raw_text: str, extracted_entities: list[str] | None = None, confidence_score: float = 0.0) -> str:
+    """W10: park an input that doesn't fit any known partition.
+
+    Brain grows new lobes when 3+ similar quarantined items show up — see
+    scripts/novel_pattern_detector.py.
+    """
+    tz = ZoneInfo(USER_TIMEZONE)
+    now = datetime.now(tz)
+    stamp = now.strftime("%Y-%m-%dT%H%M")
+    path = f"wiki/inbox-novel/{stamp}-{_slug(raw_text, 30)}.md"
+    entities_str = ", ".join(extracted_entities or [])
+    content = (
+        f"---\ntitle: \"{raw_text[:80]}\"\npartition: inbox-novel\ntype: novel-capture\n"
+        f"captured_at: {now.strftime('%Y-%m-%dT%H:%M')}\n"
+        f"extracted_entities: [{entities_str}]\nconfidence_score: {confidence_score}\n"
+        f"triaged: false\ntarget_partition: \n"
+        f"sources: [overseer]\ncreated: {now.strftime('%Y-%m-%d')}\nupdated: {now.strftime('%Y-%m-%d')}\n"
+        f"tags: [inbox, novel]\n---\n\n"
+        f"{raw_text}\n"
+    )
+    return vault_write(path, content, f"overseer: novel — {raw_text[:40]}")
+
+
 TOOLS_MAP = {
     "vault_read": vault_read,
     "vault_write": vault_write,
     "vault_search": vault_search,
     "list_notes": list_notes,
-    "sleipnir_query": sleipnir_query,
+    "vault_inbox_query": vault_inbox_query,
     "write_calendar_event": write_calendar_event,
     "write_health_daily": write_health_daily,
     "write_place_visit": write_place_visit,
     "write_finance_transaction": write_finance_transaction,
     "write_todo": write_todo,
     "update_wiki_page": update_wiki_page,
+    "write_deal": write_deal,
+    "write_lead": write_lead,
+    "write_client": write_client,
+    "write_bookmark": write_bookmark,
+    "write_reading_item": write_reading_item,
+    "write_journal_entry": write_journal_entry,
+    "write_contact": write_contact,
+    "write_idea": write_idea,
+    "write_trip": write_trip,
+    "quarantine_capture": quarantine_capture,
 }
 
 TOOLS_SPEC = [
@@ -290,8 +500,8 @@ TOOLS_SPEC = [
         "parameters": {"type": "object", "properties": {"folder": {"type": "string"}}, "required": ["folder"]},
     }},
     {"type": "function", "function": {
-        "name": "sleipnir_query",
-        "description": "Query recent activity clusters from Sleipnir (the distillation layer). Returns what Sam was working on.",
+        "name": "vault_inbox_query",
+        "description": "Query recent activity clusters from the vault inbox (distilled by Sleipnir). Returns what Sam was working on.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -396,6 +606,156 @@ TOOLS_SPEC = [
             "required": ["path", "content_to_append"],
         },
     }},
+    {"type": "function", "function": {
+        "name": "write_deal",
+        "description": "Add a sales deal to wiki/sales/deals/. Use when Sam mentions a new opportunity, deal status change, or pipeline update.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "client": {"type": "string"},
+                "status": {"type": "string", "description": "lead|qualified|proposal|negotiation|won|lost"},
+                "value": {"type": "number"},
+                "currency": {"type": "string"},
+                "close_date": {"type": "string", "description": "YYYY-MM-DD"},
+                "next_action": {"type": "string"},
+                "notes": {"type": "string"},
+            },
+            "required": ["client"],
+        },
+    }},
+    {"type": "function", "function": {
+        "name": "write_lead",
+        "description": "Add a sales lead to wiki/sales/leads/.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "source": {"type": "string"},
+                "status": {"type": "string", "description": "cold|warm|qualified"},
+                "notes": {"type": "string"},
+            },
+            "required": ["name"],
+        },
+    }},
+    {"type": "function", "function": {
+        "name": "write_client",
+        "description": "Add a closed-won client to wiki/sales/clients/.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "mrr": {"type": "number"},
+                "relationship": {"type": "string"},
+                "notes": {"type": "string"},
+            },
+            "required": ["name"],
+        },
+    }},
+    {"type": "function", "function": {
+        "name": "write_bookmark",
+        "description": "Save a URL to wiki/bookmarks/. Use when Sam shares a link or asks you to save one.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string"},
+                "title": {"type": "string"},
+                "topic": {"type": "string"},
+                "source": {"type": "string"},
+                "summary": {"type": "string"},
+                "tags": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["url"],
+        },
+    }},
+    {"type": "function", "function": {
+        "name": "write_reading_item",
+        "description": "Add a book/article/course/podcast to wiki/reading/.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "medium": {"type": "string", "description": "book|article|course|podcast"},
+                "author": {"type": "string"},
+                "status": {"type": "string", "description": "queue|reading|done|abandoned"},
+                "progress_pct": {"type": "integer"},
+                "notes": {"type": "string"},
+            },
+            "required": ["title"],
+        },
+    }},
+    {"type": "function", "function": {
+        "name": "write_journal_entry",
+        "description": "Create or update a daily journal entry in wiki/journal/YYYY/MM/. Use when Sam describes how a day went or reflects on mood/energy.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "date": {"type": "string", "description": "YYYY-MM-DD (default today)"},
+                "mood": {"type": "integer", "description": "1-10"},
+                "energy": {"type": "integer", "description": "1-10"},
+                "key_events": {"type": "array", "items": {"type": "string"}},
+                "gratitude": {"type": "array", "items": {"type": "string"}},
+                "body": {"type": "string"},
+            },
+        },
+    }},
+    {"type": "function", "function": {
+        "name": "write_contact",
+        "description": "Add a business contact/vendor/supplier to wiki/contacts/. Distinct from personal/people/ which holds family/close-friends only.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "org": {"type": "string"},
+                "role": {"type": "string"},
+                "relationship": {"type": "string", "description": "business|vendor|supplier"},
+                "email": {"type": "string"},
+                "phone": {"type": "string"},
+                "notes": {"type": "string"},
+            },
+            "required": ["name"],
+        },
+    }},
+    {"type": "function", "function": {
+        "name": "write_idea",
+        "description": "Quick-capture an idea to wiki/inbox-ideas/ for later triage. Use for half-formed thoughts that map to a partition but aren't ready to file.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string"},
+                "tags": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["text"],
+        },
+    }},
+    {"type": "function", "function": {
+        "name": "write_trip",
+        "description": "Add a trip to wiki/travel/trips/.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "destination": {"type": "string"},
+                "start_date": {"type": "string", "description": "YYYY-MM-DD"},
+                "end_date": {"type": "string"},
+                "places": {"type": "array", "items": {"type": "string"}},
+                "itinerary": {"type": "string"},
+                "notes": {"type": "string"},
+            },
+            "required": ["destination", "start_date"],
+        },
+    }},
+    {"type": "function", "function": {
+        "name": "quarantine_capture",
+        "description": "Park an input that doesn't fit any existing partition. Use ONLY when Sam tells you something that doesn't map to known schemas — confirm with Sam first ('I don't have a home for this — parking in inbox-novel/, ok?'). Brain grows new lobes from accumulated quarantine items.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "raw_text": {"type": "string"},
+                "extracted_entities": {"type": "array", "items": {"type": "string"}},
+                "confidence_score": {"type": "number"},
+            },
+            "required": ["raw_text"],
+        },
+    }},
 ]
 
 
@@ -478,6 +838,25 @@ async def _stream_ollama(url: str, messages: list[dict], ctx_opts: dict):
                     yield data.get("message", {}).get("content") or "", [], stats
 
 
+def _filter_args(tool_fn, args: dict) -> tuple[dict, list[str]]:
+    """Keep only args the function actually accepts. Returns (filtered, dropped_names).
+
+    Small models often invent field names (e.g. 'description' instead of 'summary').
+    Silently dropping unknowns and logging is more useful than raising TypeError.
+    """
+    import inspect
+    try:
+        sig = inspect.signature(tool_fn)
+    except (TypeError, ValueError):
+        return args, []
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+        return args, []
+    allowed = set(sig.parameters.keys())
+    kept = {k: v for k, v in args.items() if k in allowed}
+    dropped = [k for k in args if k not in allowed]
+    return kept, dropped
+
+
 async def run_tool_loop(messages: list[dict]) -> tuple[str, list[str]]:
     tool_log: list[str] = []
     for _ in range(12):
@@ -493,10 +872,14 @@ async def run_tool_loop(messages: list[dict]) -> tuple[str, list[str]]:
                     data = json.loads(raw)
                     tool_name = data.pop("t", None)
                     if tool_name and tool_name in TOOLS_MAP:
-                        short_args = ", ".join(f"{k}={repr(v)[:40]}" for k, v in data.items())
+                        tool_fn = TOOLS_MAP[tool_name]
+                        kept, dropped = _filter_args(tool_fn, data)
+                        if dropped:
+                            logging.info("text tool %s: dropped unknown args %s", tool_name, dropped)
+                        short_args = ", ".join(f"{k}={repr(v)[:40]}" for k, v in kept.items())
                         tool_log.append(f"{tool_name}({short_args})")
                         try:
-                            TOOLS_MAP[tool_name](**data)
+                            tool_fn(**kept)
                         except Exception as e:
                             logging.warning("text tool error %s: %s", tool_name, e)
                 except (json.JSONDecodeError, TypeError, KeyError) as e:
@@ -515,13 +898,20 @@ async def run_tool_loop(messages: list[dict]) -> tuple[str, list[str]]:
             raw_args = fn.get("arguments", {})
             args = json.loads(raw_args) if isinstance(raw_args, str) else (raw_args or {})
 
-            short_args = ", ".join(f"{k}={repr(v)[:40]}" for k, v in args.items())
-            tool_log.append(f"{name}({short_args})")
-
             tool_fn = TOOLS_MAP.get(name)
             if tool_fn:
+                kept, dropped = _filter_args(tool_fn, args)
+                if dropped:
+                    logging.info("tool %s: dropped unknown args %s", name, dropped)
+            else:
+                kept = args
+
+            short_args = ", ".join(f"{k}={repr(v)[:40]}" for k, v in kept.items())
+            tool_log.append(f"{name}({short_args})")
+
+            if tool_fn:
                 try:
-                    result = tool_fn(**args)
+                    result = tool_fn(**kept)
                 except Exception as e:
                     result = f"[tool error: {e}]"
             else:
@@ -592,7 +982,7 @@ def _read_urchin_journal(hours: int = 6) -> str:
 def _recent_activity_context() -> str:
     # Prefer Sleipnir clusters (distilled, semantically grouped)
     if SLEIPNIR_DB.exists():
-        activity = sleipnir_query(hours=6)
+        activity = vault_inbox_query(hours=6)
         if activity and "[" not in activity:
             return f"\nRecent activity (Sleipnir, last 6h):\n{activity}\n"
     # Fall back to raw Urchin journal
@@ -620,6 +1010,39 @@ def _load_facts() -> str:
     return buf or "[none yet]"
 
 
+def _load_people_index() -> str:
+    """Build a compact index of known people from wiki/personal/people/*.md.
+
+    Injected into the system prompt so Overseer never invents relationships.
+    Format: one line per person — slug | name | relationship (if known).
+    Pages flagged sources: [synthesized] are skipped — those are hallucination residue.
+    """
+    people_dir = VAULT_PATH / "wiki" / "personal" / "people"
+    if not people_dir.exists():
+        return "[no people indexed yet]"
+    lines: list[str] = []
+    for f in sorted(people_dir.glob("*.md")):
+        if f.name.startswith("_") or f.stem == "index":
+            continue
+        try:
+            text = f.read_text()
+        except Exception:
+            continue
+        if "sources: [synthesized]" in text or "sources:\n  - synthesized" in text:
+            continue  # skip hallucination residue
+        name = f.stem
+        rel = ""
+        for line in text.splitlines()[:20]:
+            line = line.strip()
+            if line.startswith("name:"):
+                name = line.split(":", 1)[1].strip() or name
+            elif line.startswith("relationship:"):
+                rel = line.split(":", 1)[1].strip()
+        suffix = f" — {rel}" if rel else ""
+        lines.append(f"- {f.stem}: {name}{suffix}")
+    return "\n".join(lines) if lines else "[no people indexed yet]"
+
+
 def _skills_index() -> str:
     skills_dir = VAULT_PATH / "overseer" / "skills"
     if not skills_dir.exists():
@@ -637,36 +1060,93 @@ _system_prompt_cache: tuple[float, str] | None = None
 _SYSTEM_PROMPT_TTL = 120  # rebuild every 2 minutes to pick up new Sleipnir data
 
 
+def _load_novel_proposals() -> str:
+    """W10 — surface pending cluster-genesis proposals from novel_pattern_detector."""
+    proposals_file = VAULT_PATH / "wiki" / "inbox-novel" / "_proposals.md"
+    if not proposals_file.exists():
+        return ""
+    try:
+        text = proposals_file.read_text()
+    except Exception:
+        return ""
+    # strip frontmatter, return body
+    if text.startswith("---"):
+        end = text.find("\n---", 4)
+        if end >= 0:
+            text = text[end + 4:].lstrip()
+    if "No patterns yet" in text:
+        return ""
+    return text[:1500]
+
+
 def build_system_prompt() -> str:
     tz = ZoneInfo(USER_TIMEZONE)
     now_str = datetime.now(tz).strftime("%Y-%m-%d, %A, %H:%M %Z")
     facts = _load_facts()
+    people = _load_people_index()
+    proposals = _load_novel_proposals()
 
-    return f"""You are Overseer, Sam's personal AI assistant. Sam is the person talking to you — you are not Sam.
+    return f"""You are Overseer, Sam's personal AI assistant — his Jarvis. Sam is the person talking to you. You are not Sam.
 
-Sam Charles, 21, Capitol Hill Seattle. Founder of Orinadus (builds Urchin) and Mad House (agents, tools).
-You have full access to Sam's vault — his second brain: notes, calendar, health, finance, projects, people.
+YOUR IDENTITY:
+You are Sam's personal project. You are NOT a Mad House project. You are NOT an Orinadus project. Overseer exists to help Sam organize his life so he can build those (separate) companies.
+
+ABOUT SAM:
+Sam Charles (Samuel), 21, Capitol Hill Seattle. Founder of Orinadus. Creator of Mad House.
+Mad House and Orinadus are FULLY SEPARATE companies with no relation, no shared IP, no parent/child. Never blend them or speak of them as one.
+- Orinadus owns Urchin (raw event ingestion infra) and Sleipnir (distillation infra). GitHub org: orinadus-systems.
+- Mad House is a separate studio with its own brand and projects.
+
+VAULT:
+Sam's vault at ~/vault/ is his second brain — the source of truth for everything personal: people, relationships, calendar, health, finance, places, projects. Schema is in `VAULT.md`. You read it. You write it. Never invent facts about Sam's life that aren't grounded in vault data.
 
 TOOL PROTOCOL:
 Call tools by outputting this exact format on its own line (nothing before @@TOOL@@):
 @@TOOL@@{{"t":"tool_name","key":"value"}}
 
-Examples:
+Examples (only invoke when actually relevant — these reference real vault paths and shapes):
 @@TOOL@@{{"t":"write_calendar_event","date":"2026-05-25","title":"Meeting with Armond","time":"10:00","duration_mins":120,"location":"621 12th Ave E, Seattle WA"}}
 @@TOOL@@{{"t":"write_todo","task":"Call dentist","due_date":"2026-05-25"}}
-@@TOOL@@{{"t":"vault_read","path":"wiki/personal/people/alex.md"}}
 @@TOOL@@{{"t":"vault_search","query":"Armond"}}
-@@TOOL@@{{"t":"vault_write","path":"wiki/personal/people/alex.md","content":"# Alex\n..."}}
+@@TOOL@@{{"t":"vault_read","path":"wiki/personal/people/mum.md"}}
 
 Rules:
 - Full JSON on that single line, starting exactly with @@TOOL@@ — no leading spaces
 - No announcement before calling — just output the @@TOOL@@ line, then confirm briefly after
-- Call immediately when Sam tells you: meeting/event → write_calendar_event, task → write_todo, health data → write_health_daily, purchase → write_finance_transaction, person info → vault_write (read first), project update → vault_write (read first)
+- Call immediately when Sam tells you:
+  · meeting/event → write_calendar_event
+  · task → write_todo
+  · health data → write_health_daily
+  · purchase → write_finance_transaction
+  · sales deal/opportunity → write_deal (lead/qualified/proposal/negotiation/won/lost)
+  · new lead → write_lead; closed-won client → write_client
+  · URL to save → write_bookmark
+  · book/article/course/podcast → write_reading_item
+  · day reflection / mood / "today was…" → write_journal_entry
+  · business contact / vendor → write_contact (NOT vault_write — contacts/ partition is distinct from personal/people/)
+  · half-formed thought → write_idea (parks in inbox-ideas/ for later triage)
+  · trip / travel plan → write_trip
+  · person info (family, close friends) → vault_write to wiki/personal/people/ (read first)
+  · project update → vault_write to wiki/projects/ or canonical company partition (read first)
 - When unsure if something is already recorded: vault_search first
+
+OUT-OF-SCHEMA INPUTS (W10 — brain grows new lobes):
+- If Sam tells you something that doesn't match any tool above and doesn't fit any partition listed in VAULT.md, do NOT shoehorn it into the closest match.
+- Instead, say ONE line: "I don't have a home for this — parking in inbox-novel/, ok?" then wait for Sam's ack.
+- On ack (y/Enter): call quarantine_capture with the raw text.
+- On "n" or alternative direction: follow Sam's lead.
+- Never invent a new partition or schema on your own; quarantine_capture is the only path for off-schema inputs.
+
+ANTI-HALLUCINATION (critical):
+- NEVER invent a person, relationship, place, or fact about Sam. If you don't know, you don't know.
+- If Sam mentions a person you don't recognise, vault_search the name first. If still no record, ask Sam — do NOT guess a relationship.
+- Tag every personal claim with its source: [vault: <path>] when sourced from the vault, [inferred] when reasoning beyond vault data, [unknown] when you have no source. Do this inline in your response.
+- Examples in this system prompt are SHAPES for tool calls, not facts about Sam. Never echo example data as if it were real.
 
 VAULT RULES:
 - Before vault_write: always call vault_read first to merge, never overwrite cold.
 - vault_search before writing new knowledge pages.
+- Every wiki page needs a `sources:` frontmatter field. Pages with `sources: [synthesized]` are flagged as hallucination risk.
 
 VOICE:
 - Short. 1-3 sentences unless Sam asks for more.
@@ -674,13 +1154,17 @@ VOICE:
 - Casual input gets casual response. Don't search the vault for "whatsup".
 
 CONTEXT (when Sam asks about activity or history):
-- sleipnir_query: what Sam was working on recently
+- vault_inbox_query: what Sam was working on recently (distilled activity clusters in the vault inbox)
 - vault_search: search the vault
 - vault_read: read a specific page
+
+PEOPLE SAM KNOWS (from vault — only assert relationships listed here; if Sam mentions someone not on this list, vault_search first, then ask if still unknown):
+{people}
 
 FACTS (from memory):
 {facts}
 
+{f'PENDING NOVEL-CLUSTER PROPOSALS (surface ONCE early in the session, ask Sam if he wants any of these new partitions created — never auto-create):\n{proposals}\n' if proposals else ''}
 Today: {now_str}"""
 
 

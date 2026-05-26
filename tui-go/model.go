@@ -71,6 +71,16 @@ type model struct {
 	sessions      []sessionInfo
 	sessionCursor int
 	stateDir      string
+
+	// W2: slash-command palette state
+	slashOpen    bool       // is the palette currently visible?
+	slashMatches []slashCmd // commands matching current input
+	slashCursor  int        // selected entry in slashMatches
+
+	// W2: input history (arrow-up cycles past user messages)
+	inputHistory  []string
+	historyCursor int    // -1 = not navigating; else index into inputHistory
+	historySaved  []rune // original buffer to restore on Esc-out-of-history
 }
 
 func newModel(apiURL, stateDir string) model {
@@ -78,11 +88,13 @@ func newModel(apiURL, stateDir string) model {
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(colAccent)
 	return model{
-		apiURL:   apiURL,
-		stateDir: stateDir,
-		threadID: genID(),
-		sp:       sp,
-		view:     startView,
+		apiURL:        apiURL,
+		stateDir:      stateDir,
+		threadID:      genID(),
+		sp:            sp,
+		view:          startView,
+		inputHistory:  loadInputHistory(),
+		historyCursor: -1,
 	}
 }
 
@@ -297,6 +309,11 @@ func (m model) handleSessionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Slash palette consumes most keys when open.
+	if m.slashOpen {
+		return m.handleSlashKey(msg)
+	}
+
 	// Always-on keys
 	switch msg.Type {
 	case tea.KeyCtrlC:
@@ -310,17 +327,55 @@ func (m model) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.streamBody = nil
 				m.streamScanner = nil
 			}
-			if n := len(m.messages); n > 0 && m.messages[n-1].role == "assistant" && m.messages[n-1].content == "" {
-				m.messages = m.messages[:n-1]
+			// Preserve partial assistant content with a [cancelled] tag so the
+			// user sees what came through. Empty partials are still removed.
+			if n := len(m.messages); n > 0 && m.messages[n-1].role == "assistant" {
+				if m.messages[n-1].content == "" {
+					m.messages = m.messages[:n-1]
+				} else {
+					m.messages[n-1].content = strings.TrimRight(m.messages[n-1].content, " \n") + "  [cancelled]"
+				}
 			}
 		}
 		return m, nil
 
 	case tea.KeyUp:
+		// If input is empty and we have history, cycle backward through it
+		// instead of scrolling messages. Matches Claude Code / bash UX.
+		if len(m.inputBuf) == 0 && len(m.inputHistory) > 0 && !m.loading {
+			if m.historyCursor == -1 {
+				m.historySaved = nil
+				m.historyCursor = len(m.inputHistory) - 1
+			} else if m.historyCursor > 0 {
+				m.historyCursor--
+			}
+			m.inputBuf = []rune(m.inputHistory[m.historyCursor])
+			return m, nil
+		}
+		if m.historyCursor != -1 {
+			// Already navigating; keep cycling backward
+			if m.historyCursor > 0 {
+				m.historyCursor--
+				m.inputBuf = []rune(m.inputHistory[m.historyCursor])
+			}
+			return m, nil
+		}
 		m.scrollOffset++
 		return m, nil
 
 	case tea.KeyDown:
+		if m.historyCursor != -1 {
+			if m.historyCursor < len(m.inputHistory)-1 {
+				m.historyCursor++
+				m.inputBuf = []rune(m.inputHistory[m.historyCursor])
+			} else {
+				// Past the latest entry → restore (or empty)
+				m.historyCursor = -1
+				m.inputBuf = m.historySaved
+				m.historySaved = nil
+			}
+			return m, nil
+		}
 		if m.scrollOffset > 0 {
 			m.scrollOffset--
 		}
@@ -359,12 +414,15 @@ func (m model) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.inputBuf = nil
-		m.messages = append(m.messages, chatMsg{role: "user", content: text})
-		m.messages = append(m.messages, chatMsg{role: "assistant", content: ""})
-		m.loading = true
-		m.lastErr = ""
-		m.scrollOffset = 0
-		return m, tea.Batch(m.sp.Tick, startStreamCmd(m.apiURL, text, m.threadID))
+		m.historyCursor = -1
+		m.historySaved = nil
+		m.inputHistory = appendInputHistory(m.inputHistory, text)
+		// Slash commands typed directly (without using the palette) get
+		// the same treatment as palette-completed ones.
+		if strings.HasPrefix(text, "/") {
+			return m.executeSlash(text)
+		}
+		return m.sendChat(text)
 
 	case tea.KeyCtrlJ:
 		m.inputBuf = append(m.inputBuf, '\n')
@@ -378,23 +436,218 @@ func (m model) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(m.inputBuf) > 0 {
 			m.inputBuf = m.inputBuf[:len(m.inputBuf)-1]
 		}
+		// Backing out of a history-restored buffer cancels nav mode.
+		if m.historyCursor != -1 {
+			m.historyCursor = -1
+			m.historySaved = nil
+		}
 		return m, nil
 
 	case tea.KeyRunes:
-		m.inputBuf = append(m.inputBuf, []rune(msg.String())...)
+		// First "/" with empty buffer opens the slash palette.
+		s := msg.String()
+		if len(m.inputBuf) == 0 && s == "/" {
+			m.inputBuf = []rune{'/'}
+			m.slashOpen = true
+			m.slashMatches = matchSlash("/")
+			m.slashCursor = 0
+			return m, nil
+		}
+		m.inputBuf = append(m.inputBuf, []rune(s)...)
+		// Any typing exits history nav.
+		if m.historyCursor != -1 {
+			m.historyCursor = -1
+			m.historySaved = nil
+		}
 		return m, nil
 
 	case tea.KeyCtrlN:
-		m.threadID = genID()
-		m.messages = []chatMsg{{role: "assistant", content: "ready. what do you need?"}}
+		return m.resetThread()
+	}
+
+	return m, nil
+}
+
+// ── Slash palette ──────────────────────────────────────────────────────────────
+
+func (m model) handleSlashKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyCtrlC:
+		return m, tea.Quit
+	case tea.KeyEsc:
+		// Close the palette but keep the typed text — user might want to chat literally.
+		m.slashOpen = false
+		m.slashMatches = nil
+		return m, nil
+	case tea.KeyUp:
+		if m.slashCursor > 0 {
+			m.slashCursor--
+		}
+		return m, nil
+	case tea.KeyDown:
+		if m.slashCursor < len(m.slashMatches)-1 {
+			m.slashCursor++
+		}
+		return m, nil
+	case tea.KeyTab:
+		if len(m.slashMatches) > 0 {
+			sel := m.slashMatches[m.slashCursor]
+			m.inputBuf = []rune(sel.name + " ")
+			m.slashOpen = false
+			m.slashMatches = nil
+		}
+		return m, nil
+	case tea.KeyEnter:
+		if len(m.slashMatches) == 0 {
+			m.slashOpen = false
+			return m, nil
+		}
+		// Pick selected (or only) command; if user typed extra args after
+		// the partial, treat the full inputBuf as the command line.
+		typed := strings.TrimSpace(string(m.inputBuf))
+		sel := m.slashMatches[m.slashCursor]
+		var cmdLine string
+		if strings.HasPrefix(typed, sel.name+" ") || typed == sel.name {
+			cmdLine = typed
+		} else {
+			cmdLine = sel.name
+		}
+		m.inputBuf = nil
+		m.slashOpen = false
+		m.slashMatches = nil
+		m.historyCursor = -1
+		m.inputHistory = appendInputHistory(m.inputHistory, cmdLine)
+		return m.executeSlash(cmdLine)
+	case tea.KeyBackspace, tea.KeyDelete:
+		if len(m.inputBuf) > 0 {
+			m.inputBuf = m.inputBuf[:len(m.inputBuf)-1]
+		}
+		if len(m.inputBuf) == 0 || m.inputBuf[0] != '/' {
+			m.slashOpen = false
+			m.slashMatches = nil
+			return m, nil
+		}
+		m.slashMatches = matchSlash(string(m.inputBuf))
+		if m.slashCursor >= len(m.slashMatches) {
+			m.slashCursor = 0
+		}
+		return m, nil
+	case tea.KeySpace:
+		m.inputBuf = append(m.inputBuf, ' ')
+		// Once the user types a space after the command name, hide the palette
+		// — they're typing args now, not picking commands.
+		if cmd, _ := splitSlash(string(m.inputBuf)); cmd != "" {
+			if _, ok := findCmd(cmd); ok {
+				m.slashOpen = false
+				m.slashMatches = nil
+			}
+		}
+		return m, nil
+	case tea.KeyRunes:
+		m.inputBuf = append(m.inputBuf, []rune(msg.String())...)
+		m.slashMatches = matchSlash(string(m.inputBuf))
+		if len(m.slashMatches) == 0 {
+			// User typed past any match — leave palette open with empty list
+			// so they can backspace; or close immediately. Close is simpler.
+			m.slashOpen = false
+		}
+		if m.slashCursor >= len(m.slashMatches) {
+			m.slashCursor = 0
+		}
+		return m, nil
+	}
+	return m, nil
+}
+
+// executeSlash takes a full slash-command line and dispatches.
+func (m model) executeSlash(line string) (tea.Model, tea.Cmd) {
+	name, args := splitSlash(line)
+	cmd, ok := findCmd(name)
+	if !ok {
+		// Unknown slash — surface as error so the user notices the typo.
+		m.lastErr = "unknown command: " + name + " (try /help)"
+		return m, nil
+	}
+	switch cmd.localAction {
+	case "quit":
+		return m, tea.Quit
+	case "new":
+		return m.resetThread()
+	case "sessions":
+		m.view = sessionView
+		m.sessionCursor = 0
+		return m, loadSessionsCmd(m.stateDir)
+	case "clear":
+		m.messages = []chatMsg{{role: "assistant", content: "cleared. what's next?"}}
 		m.activityLog = nil
-		m.tokensTotal = 0
-		m.tps = 0
 		m.scrollOffset = 0
 		m.lastErr = ""
 		return m, nil
+	case "help":
+		var b strings.Builder
+		b.WriteString("commands:\n")
+		for _, c := range slashCommands {
+			b.WriteString("  ")
+			b.WriteString(c.name)
+			if c.usage != "" {
+				b.WriteString(" ")
+				b.WriteString(c.usage)
+			}
+			b.WriteString("  —  ")
+			b.WriteString(c.desc)
+			b.WriteString("\n")
+		}
+		m.messages = append(m.messages, chatMsg{role: "assistant", content: b.String()})
+		m.scrollOffset = 0
+		return m, nil
+	case "activity":
+		var b strings.Builder
+		if len(m.activityLog) == 0 {
+			b.WriteString("no tool activity this session yet.")
+		} else {
+			b.WriteString("recent vault writes / tool calls:\n")
+			for _, e := range m.activityLog {
+				mark := "·"
+				if e.done {
+					mark = "✓"
+				}
+				b.WriteString("  " + mark + " " + e.name)
+				if e.args != "" {
+					b.WriteString(" — " + e.args)
+				}
+				b.WriteString("\n")
+			}
+		}
+		m.messages = append(m.messages, chatMsg{role: "assistant", content: b.String()})
+		m.scrollOffset = 0
+		return m, nil
 	}
+	// No local action → transform args into a chat message and send.
+	if cmd.transform != nil {
+		return m.sendChat(cmd.transform(args))
+	}
+	// Fallback: send the raw line if no transform defined.
+	return m.sendChat(line)
+}
 
+// sendChat enqueues a user→assistant exchange and starts the stream.
+func (m model) sendChat(text string) (tea.Model, tea.Cmd) {
+	m.messages = append(m.messages, chatMsg{role: "user", content: text})
+	m.messages = append(m.messages, chatMsg{role: "assistant", content: ""})
+	m.loading = true
+	m.lastErr = ""
+	m.scrollOffset = 0
+	return m, tea.Batch(m.sp.Tick, startStreamCmd(m.apiURL, text, m.threadID))
+}
+
+func (m model) resetThread() (tea.Model, tea.Cmd) {
+	m.threadID = genID()
+	m.messages = []chatMsg{{role: "assistant", content: "ready. what do you need?"}}
+	m.activityLog = nil
+	m.tokensTotal = 0
+	m.tps = 0
+	m.scrollOffset = 0
+	m.lastErr = ""
 	return m, nil
 }
 
@@ -611,7 +864,7 @@ func (m model) renderHeader(w int) string {
 }
 
 func (m model) renderStatus(w int) string {
-	hints := "enter:send  ctrl+j/alt+enter:newline  ↑↓:scroll  ctrl+n:new  ctrl+l:sessions  ctrl+c:quit"
+	hints := "enter:send  alt+enter:newline  ↑:history/scroll  ctrl+n:new  ctrl+l:sessions  /:commands  ctrl+c:quit"
 	_ = w
 	return statusStyle.Render(hints)
 }
@@ -623,8 +876,17 @@ func (m model) renderBody(w, h int) string {
 		bodyH = 3
 	}
 
-	// body = msgArea(bodyH-2) + sep(1) + input(1)
-	msgAreaH := bodyH - 2
+	// Palette height: one line per matching command, capped at 7.
+	paletteH := 0
+	if m.slashOpen && len(m.slashMatches) > 0 {
+		paletteH = len(m.slashMatches)
+		if paletteH > 7 {
+			paletteH = 7
+		}
+	}
+
+	// body = msgArea(bodyH-2-paletteH) + sep(1) + palette(paletteH) + input(1)
+	msgAreaH := bodyH - 2 - paletteH
 	if msgAreaH < 1 {
 		msgAreaH = 1
 	}
@@ -661,12 +923,12 @@ func (m model) renderBody(w, h int) string {
 	}
 
 	sep := sepStyle.Render(strings.Repeat("─", w))
-	input := m.renderInput()
+	input := m.renderInput(w)
 
 	return strings.Join(rows, "\n") + "\n" + sep + "\n" + input
 }
 
-func (m model) renderInput() string {
+func (m model) renderInput(w int) string {
 	if m.loading {
 		n := len(m.messages)
 		if n > 0 && m.messages[n-1].role == "assistant" && m.messages[n-1].content == "" {
@@ -674,13 +936,51 @@ func (m model) renderInput() string {
 		}
 		return hintStyle.Render("▌")
 	}
+
+	var sb strings.Builder
+
+	// Slash palette — rendered above the input line.
+	if m.slashOpen && len(m.slashMatches) > 0 {
+		max := len(m.slashMatches)
+		if max > 7 {
+			max = 7
+		}
+		// Find widest command name for alignment.
+		nameW := 0
+		for i := 0; i < max; i++ {
+			if n := len(m.slashMatches[i].name); n > nameW {
+				nameW = n
+			}
+		}
+		for i := 0; i < max; i++ {
+			c := m.slashMatches[i]
+			pad := strings.Repeat(" ", nameW-len(c.name))
+			desc := c.desc
+			if c.usage != "" {
+				desc += "  " + c.usage
+			}
+			line := fmt.Sprintf("  %s%s  %s", c.name, pad, desc)
+			if w > 4 && lipgloss.Width(line) > w-2 {
+				line = line[:w-2]
+			}
+			if i == m.slashCursor {
+				line = "▶ " + line[2:]
+				sb.WriteString(selectedStyle.Render(line))
+			} else {
+				sb.WriteString(hintStyle.Render(line))
+			}
+			sb.WriteByte('\n')
+		}
+	}
+
 	inputText := string(m.inputBuf)
 	lines := strings.Split(inputText, "\n")
 	display := lines[len(lines)-1]
 	if len(lines) > 1 {
 		display = fmt.Sprintf("[%d lines] ", len(lines)) + display
 	}
-	return hintStyle.Render("> ") + display + "█"
+	sb.WriteString(hintStyle.Render("> ") + display + "█")
+	return sb.String()
 }
 
 // ── Chat line builder ─────────────────────────────────────────────────────────

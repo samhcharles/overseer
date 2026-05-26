@@ -76,8 +76,25 @@ def process_file(path: Path) -> None:
     if not dest or dest == "ignore":
         return
 
+    # Canonical partitions per ~/vault/VAULT.md. Triage destination must match.
+    # Without this guard, Overseer's "either-or" answers (e.g. "madhouse|daily")
+    # were being turned into literal pipe-char directories.
+    CANONICAL_PARTITIONS = {
+        "orinadus", "madhouse", "personal", "finance", "health",
+        "calendar", "places", "knowledge", "systems",
+        "sales", "bookmarks", "reading", "journal", "projects",
+        "contacts", "travel", "inbox-ideas", "inbox-novel",
+    }
+    dest_parts = [p for p in dest.replace("\\", "/").split("/") if p]
+    if not dest_parts or "|" in dest or ".." in dest_parts or dest_parts[0] not in CANONICAL_PARTITIONS:
+        print(f"[tagger] rejecting non-canonical destination: {dest!r}", file=sys.stderr)
+        return
+    safe_dest = "/".join(dest_parts)
+    if not safe_dest.startswith("wiki/"):
+        safe_dest = f"wiki/{safe_dest}"
+
     today = datetime.now().strftime("%Y-%m")
-    wiki_file = VAULT_PATH / dest / f"digest-{today}.md"
+    wiki_file = VAULT_PATH / safe_dest / f"digest-{today}.md"
     wiki_file.parent.mkdir(parents=True, exist_ok=True)
 
     entry_lines = [
