@@ -36,7 +36,7 @@ func main() {
 
 	apiURL := os.Getenv("OVERSEER_API_URL")
 	if apiURL == "" {
-		apiURL = "http://localhost:7860"
+		apiURL = "http://localhost:8765"
 	}
 
 	stateDir := os.Getenv("OVERSEER_STATE_DIR")

@@ -595,6 +595,7 @@ func (m model) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Alt+Enter or Ctrl+J → newline within textarea
 	if (msg.Type == tea.KeyEnter && msg.Alt) || msg.Type == tea.KeyCtrlJ {
 		m.input.SetValue(m.input.Value() + "\n")
+		m.input.CursorEnd()
 		// Grow input height if needed (cap at 8 lines)
 		h := m.input.LineCount()
 		if h < 1 {
@@ -697,17 +698,6 @@ func clampScroll(v, max int) int {
 		return max
 	}
 	return v
-}
-
-func (m *model) scrollIfPossible(delta int) {
-	if delta < 0 && m.scrollOffset > 0 {
-		m.scrollOffset += delta
-		if m.scrollOffset < 0 {
-			m.scrollOffset = 0
-		}
-	} else if delta > 0 {
-		m.scrollOffset += delta
-	}
 }
 
 func (m model) isInputEmpty() bool {
@@ -1184,8 +1174,8 @@ func (m model) renderHelp(w, h int) string {
 
 	lines = append(lines, "")
 	lines = append(lines, asstLabelStyle.Render("note"))
-	lines = append(lines, "  "+hintStyle.Render("shift+enter works natively on modern terminals via modify-other-keys"))
-	lines = append(lines, "  "+hintStyle.Render("and Kitty CSI-u — enabled on startup. alt+enter / ctrl+j are universal"))
+	lines = append(lines, "  "+hintStyle.Render("shift+enter works on terminals that support modify-other-keys (xterm,"))
+	lines = append(lines, "  "+hintStyle.Render("Windows Terminal, WezTerm, Ghostty). alt+enter / ctrl+j are universal"))
 	lines = append(lines, "  "+hintStyle.Render("fallbacks. for serious multi-line editing, ctrl+g opens $EDITOR."))
 
 	for len(lines) < h {
@@ -1381,11 +1371,13 @@ func (m *model) buildChatLines(w, maxLines int) []string {
 	for i := range m.messages {
 		msg := &m.messages[i]
 		var label string
-		ts := msg.ts.Format("15:04")
 		if msg.role == "user" {
-			label = userLabelStyle.Render("you") + "  " + hintStyle.Render(ts)
+			label = userLabelStyle.Render("you")
 		} else {
-			label = asstLabelStyle.Render("overseer") + "  " + hintStyle.Render(ts)
+			label = asstLabelStyle.Render("overseer")
+		}
+		if !msg.ts.IsZero() {
+			label += "  " + hintStyle.Render(msg.ts.Format("15:04"))
 		}
 		all = append(all, label)
 
@@ -1553,35 +1545,6 @@ func (m model) buildPanelLines(w, h int) []string {
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
-
-func wordWrap(text string, width int) []string {
-	if width <= 0 {
-		width = 80
-	}
-	var result []string
-	for _, para := range strings.Split(text, "\n") {
-		if para == "" {
-			result = append(result, "")
-			continue
-		}
-		words := strings.Fields(para)
-		var line strings.Builder
-		for _, w := range words {
-			if line.Len()+len(w)+1 > width && line.Len() > 0 {
-				result = append(result, line.String())
-				line.Reset()
-			}
-			if line.Len() > 0 {
-				line.WriteByte(' ')
-			}
-			line.WriteString(w)
-		}
-		if line.Len() > 0 {
-			result = append(result, line.String())
-		}
-	}
-	return result
-}
 
 func trunc(s string, max int) string {
 	if max < 1 {
