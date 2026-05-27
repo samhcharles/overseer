@@ -1,6 +1,6 @@
 {
   "name": "@samhcharles/overseer",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Overseer TUI — Bubble Tea terminal client for the Overseer local-first AI",
   "bin": {
     "overseer": "bin/overseer.js"
