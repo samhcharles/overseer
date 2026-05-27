@@ -13,20 +13,39 @@ permissions:
   id-token: write
 
 jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - id: tag
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: echo "tag=${INPUT_TAG:-$REF_NAME}" >> "$GITHUB_OUTPUT"
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          generate_release_notes: false
+
   build:
+    needs: create-release
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest,  goos: linux,   goarch: amd64, ext: '' }
-          - { os: ubuntu-latest,  goos: linux,   goarch: arm64, ext: '' }
-          - { os: ubuntu-latest,  goos: darwin,  goarch: amd64, ext: '' }
-          - { os: ubuntu-latest,  goos: darwin,  goarch: arm64, ext: '' }
-          - { os: ubuntu-latest,  goos: windows, goarch: amd64, ext: '.exe' }
-    runs-on: ${{ matrix.os }}
+          - { goos: linux,   goarch: amd64, ext: '' }
+          - { goos: linux,   goarch: arm64, ext: '' }
+          - { goos: darwin,  goarch: amd64, ext: '' }
+          - { goos: darwin,  goarch: arm64, ext: '' }
+          - { goos: windows, goarch: amd64, ext: '.exe' }
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
-        with: { go-version: stable }
+        with:
+          go-version: stable
+          cache-dependency-path: tui-go/go.sum
       - name: Build
         working-directory: tui-go
         env:
@@ -36,11 +55,11 @@ jobs:
         run: go build -trimpath -ldflags="-s -w" -o "overseer-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" .
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          tag_name: ${{ needs.create-release.outputs.tag }}
           files: tui-go/overseer-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
 
   publish-npm:
-    needs: build
+    needs: [create-release, build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -51,7 +70,7 @@ jobs:
       - name: Sync version from tag
         working-directory: tui-go/npm
         env:
-          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          TAG: ${{ needs.create-release.outputs.tag }}
         run: npm version "${TAG#v}" --no-git-tag-version --allow-same-version
       - name: Publish
         working-directory: tui-go/npm
