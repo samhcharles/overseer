@@ -23,7 +23,7 @@ jobs:
           INPUT_TAG: ${{ github.event.inputs.tag }}
           REF_NAME: ${{ github.ref_name }}
         run: echo "tag=${INPUT_TAG:-$REF_NAME}" >> "$GITHUB_OUTPUT"
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
           generate_release_notes: false
@@ -53,7 +53,7 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: 0
         run: go build -trimpath -ldflags="-s -w" -o "overseer-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" .
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.create-release.outputs.tag }}
           files: tui-go/overseer-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
