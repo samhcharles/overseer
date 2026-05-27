@@ -1,11 +1,11 @@
-# @samhcharles/overseer
+# @samhcus/overseer
 
-One-command install for the Overseer TUI — the Bubble Tea terminal client for [Overseer](https://github.com/samhcharles/overseer), a local-first AI backed by your Obsidian vault.
+One-command install for the Overseer TUI — the Bubble Tea terminal client for [Overseer](https://github.com/samhcus/overseer), a local-first AI backed by your Obsidian vault.
 
 ## Install
 
 ```bash
-npm install -g @samhcharles/overseer
+npm install -g @samhcus/overseer
 overseer
 ```
 
@@ -18,12 +18,12 @@ The postinstall step downloads the right platform binary from the matching GitHu
 ## Update
 
 ```bash
-npm update -g @samhcharles/overseer
+npm update -g @samhcus/overseer
 ```
 
 ## Backend
 
-The TUI talks to an Overseer API node (FastAPI). See the [main repo README](https://github.com/samhcharles/overseer) for setting up the API and vault.
+The TUI talks to an Overseer API node (FastAPI). See the [main repo README](https://github.com/samhcus/overseer) for setting up the API and vault.
 
 ## License
 

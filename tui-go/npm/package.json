@@ -1,5 +1,5 @@
 {
-  "name": "@samhcharles/overseer",
+  "name": "@samhcus/overseer",
   "version": "0.1.0",
   "description": "Overseer TUI — Bubble Tea terminal client for the Overseer local-first AI",
   "bin": {
@@ -18,7 +18,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/samhcharles/overseer.git"
+    "url": "git+https://github.com/samhcus/overseer.git"
   },
   "license": "MIT"
 }

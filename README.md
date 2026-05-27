@@ -10,7 +10,7 @@ curl -fsSL https://ollama.com/install.sh | sh
 ollama pull dolphin3
 
 # 2. Clone and scaffold the vault
-git clone https://github.com/samhcharles/overseer.git
+git clone https://github.com/samhcus/overseer.git
 cd overseer
 ./setup.sh
 
@@ -19,7 +19,7 @@ cd api && pip install -r requirements.txt
 uvicorn main:app --host 127.0.0.1 --port 8765 &
 
 # 4. Install and run the TUI
-npm install -g @samhcharles/overseer
+npm install -g @samhcus/overseer
 overseer
 ```
 

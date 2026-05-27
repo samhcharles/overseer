@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 // Downloads the platform-specific binary for this package from the matching
-// GitHub Release. Templated values: samhcharles/overseer, overseer, __VERSION_SOURCE__.
+// GitHub Release. Templated values: samhcus/overseer, overseer, __VERSION_SOURCE__.
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
 
-const REPO = 'samhcharles/overseer';       // e.g. samhcharles/overseer
+const REPO = 'samhcus/overseer';       // e.g. samhcus/overseer
 const BIN_NAME = 'overseer';     // e.g. overseer
 const pkg = require('../package.json');
 const VERSION = pkg.version;

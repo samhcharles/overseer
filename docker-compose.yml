@@ -29,7 +29,7 @@ services:
     restart: unless-stopped
     entrypoint: /bin/sh
     environment:
-      - GIT_USER=${GIT_USER:-samhcharles}
+      - GIT_USER=${GIT_USER:-samhcus}
       - GIT_TOKEN=${GIT_TOKEN}
     volumes:
       - vault_data:/vault
@@ -39,7 +39,7 @@ services:
         git config --global --add safe.directory /vault &&
         git config --global user.email 'overseer@brain' &&
         git config --global user.name 'Overseer' &&
-        REMOTE=https://$$GIT_USER:$$GIT_TOKEN@github.com/samhcharles/vault.git &&
+        REMOTE=https://$$GIT_USER:$$GIT_TOKEN@github.com/samhcus/vault.git &&
         sync_once() {
           if [ ! -d /vault/.git ] || ! git -C /vault rev-parse HEAD >/dev/null 2>&1; then
             find /vault -mindepth 1 -maxdepth 1 -exec rm -rf {} + &&

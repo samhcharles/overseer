@@ -21,7 +21,7 @@ ssh -o StrictHostKeyChecking=no "${VPS}" "
   set -e
   source ${APP_DIR}/.env
   rm -rf /tmp/osgw
-  git clone --depth=1 https://\${GIT_USER}:\${GIT_TOKEN}@github.com/samhcharles/overseer.git /tmp/osgw
+  git clone --depth=1 https://\${GIT_USER}:\${GIT_TOKEN}@github.com/samhcus/overseer.git /tmp/osgw
   docker build -t ${IMAGE} /tmp/osgw/api
   python3 -c \"
 import yaml
