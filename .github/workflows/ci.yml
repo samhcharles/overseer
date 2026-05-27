@@ -1,0 +1,41 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test-tui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache-dependency-path: tui-go/go.sum
+      - name: Vet
+        working-directory: tui-go
+        run: go vet ./...
+      - name: Test
+        working-directory: tui-go
+        run: go test ./...
+      - name: Build
+        working-directory: tui-go
+        env:
+          CGO_ENABLED: 0
+        run: go build ./...
+
+  lint-api:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install deps
+        working-directory: api
+        run: pip install -r requirements.txt ruff
+      - name: Lint
+        working-directory: api
+        run: ruff check .

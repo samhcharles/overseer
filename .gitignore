@@ -10,9 +10,13 @@ GEMINI.md
 # Python virtualenv
 .venv/
 
-# Go TUI binaries
+# Go TUI binaries and build artifacts
 tui-go/overseer
 tui-go/overseer-tui
+tui-go/dist/
+
+# Dead Ink TUI (removed — only untracked artifacts remain)
+tui/
 
 # Workers build artifacts
 workers/dist/

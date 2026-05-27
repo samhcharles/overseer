@@ -1,0 +1,25 @@
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /tui-go
+    schedule:
+      interval: weekly
+    labels: [dependencies]
+
+  - package-ecosystem: npm
+    directory: /tui-go/npm
+    schedule:
+      interval: weekly
+    labels: [dependencies]
+
+  - package-ecosystem: pip
+    directory: /api
+    schedule:
+      interval: weekly
+    labels: [dependencies]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    labels: [dependencies]
