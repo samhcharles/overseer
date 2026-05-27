@@ -2,6 +2,10 @@
 
 A local-first AI that lives on your machine, reads and writes a structured vault, and grows with you. Built for one person, shared so others can adopt it.
 
+```bash
+npm install -g @samhcus/overseer
+```
+
 ## Quickstart
 
 ```bash
