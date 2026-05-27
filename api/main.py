@@ -3,17 +3,10 @@ Overseer API — local inference node.
 Runs on this machine. Talks to Ollama. Writes to ~/vault.
 Registers with the always-on VPS gateway and serves /infer/chat for routing.
 """
-import asyncio
 import json
 import logging
 import os
 import re
-
-
-def trunc_str(s: str, n: int) -> str:
-    """Short helper: clip a string to n chars with an ellipsis."""
-    s = (s or "").replace("\n", " ")
-    return s if len(s) <= n else s[: n - 1] + "…"
 import sqlite3
 import subprocess
 import threading
@@ -26,6 +19,11 @@ import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
+
+def trunc_str(s: str, n: int) -> str:
+    s = (s or "").replace("\n", " ")
+    return s if len(s) <= n else s[: n - 1] + "…"
+
 
 VAULT_PATH = Path(os.environ.get("VAULT_PATH", str(Path.home() / "vault")))
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434").rstrip("/")
